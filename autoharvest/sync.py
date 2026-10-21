@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+from autoharvest.harvest import HarvestClient
+from autoharvest.models import (
+    AcknowledgedIncident,
+    HarvestTimeEntry,
+    PagerDutyShift,
+    SyncItem,
+    SyncPlan,
+    SyncStatus,
+)
+from autoharvest.pagerduty import PagerDutyClient
+
+
+def parse_datetime(dt_str: str, tz: ZoneInfo) -> datetime:
+    """Parse a datetime string (ISO 8601 or YYYY-MM-DD) into an aware datetime."""
+    s = dt_str.strip()
+    if len(s) == 10 and s.count("-") == 2:
+        # Date only: YYYY-MM-DD
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    return dt
+
+
+def is_incident_already_logged(incident: AcknowledgedIncident, harvest_entries: list[HarvestTimeEntry]) -> Optional[HarvestTimeEntry]:
+    """
+    Check if a PagerDuty incident has already been logged in Harvest.
+    Matches via:
+    1. external_reference_id == incident.incident_id
+    2. notes contain [PD-{incident_id}]
+    3. notes contain #{incident_number} and match spent_date
+    """
+    pd_tag = f"[PD-{incident.incident_id}]"
+    inc_num_tag = f"#{incident.incident_number}"
+
+    for entry in harvest_entries:
+        if entry.external_reference_id == incident.incident_id:
+            return entry
+        if pd_tag in entry.notes:
+            return entry
+        if inc_num_tag in entry.notes and entry.spent_date == incident.spent_date:
+            return entry
+
+    return None
+
+
+def resolve_shift_window(
+    pd_client: PagerDutyClient,
+    user_id: str,
+    tz: ZoneInfo,
+    lookback_days: int = 30,
+) -> tuple[datetime, datetime, PagerDutyShift]:
+    """Find the user's most recent or active on-call shift."""
+    now = datetime.now(tz)
+    since = now - timedelta(days=lookback_days)
+    until = now + timedelta(days=7)
+
+    shifts = pd_client.get_oncall_shifts(user_id, since=since, until=until)
+    if not shifts:
+        raise ValueError(
+            f"No on-call shifts found for user {user_id} in the last {lookback_days} days. "
+            "Specify explicit dates with --since and --until, or use --days."
+        )
+
+    # Prefer currently active shift, otherwise the most recently completed shift
+    active_shifts = [s for s in shifts if s.start <= now <= s.end]
+    if active_shifts:
+        chosen = active_shifts[-1]
+    else:
+        past_shifts = [s for s in shifts if s.end <= now]
+        if past_shifts:
+            chosen = past_shifts[-1]
+        else:
+            chosen = shifts[0]
+
+    return chosen.start, min(chosen.end, now), chosen
+
+
+def create_sync_plan(
+    pd_client: PagerDutyClient,
+    harvest_client: HarvestClient,
+    user_id: str,
+    since: datetime,
+    until: datetime,
+    project_id: int,
+    task_id: int,
+    hours_per_alert: float = 1.0,
+    tz: ZoneInfo = ZoneInfo("UTC"),
+) -> SyncPlan:
+    """
+    Fetch acknowledged alerts and existing Harvest entries, and construct a SyncPlan.
+    """
+    # 1. Fetch acknowledged incidents
+    incidents = pd_client.get_acknowledged_incidents(
+        user_id=user_id,
+        since=since,
+        until=until,
+        tz=tz,
+    )
+
+    # 2. Fetch existing Harvest entries for the window
+    # Harvest accepts YYYY-MM-DD
+    from_date = since.astimezone(tz).strftime("%Y-%m-%d")
+    to_date = until.astimezone(tz).strftime("%Y-%m-%d")
+    existing_entries = harvest_client.get_time_entries(from_date=from_date, to_date=to_date)
+
+    # 3. Build sync items
+    items: list[SyncItem] = []
+    for inc in incidents:
+        existing = is_incident_already_logged(inc, existing_entries)
+        if existing:
+            items.append(
+                SyncItem(
+                    incident=inc,
+                    hours=existing.hours,
+                    status=SyncStatus.ALREADY_LOGGED,
+                    harvest_entry_id=existing.id,
+                )
+            )
+        else:
+            items.append(
+                SyncItem(
+                    incident=inc,
+                    hours=hours_per_alert,
+                    status=SyncStatus.PENDING_CREATION,
+                )
+            )
+
+    return SyncPlan(
+        since=since,
+        until=until,
+        items=items,
+        project_id=project_id,
+        task_id=task_id,
+        hours_per_alert=hours_per_alert,
+    )
+
+
+def execute_sync_plan(
+    harvest_client: HarvestClient,
+    plan: SyncPlan,
+) -> list[SyncItem]:
+    """Execute creation of pending Harvest time entries."""
+    for item in plan.pending_items:
+        ext_ref = {
+            "id": item.incident.incident_id,
+            "permalink": item.incident.html_url,
+        }
+        try:
+            entry = harvest_client.create_time_entry(
+                project_id=plan.project_id,
+                task_id=plan.task_id,
+                spent_date=item.incident.spent_date,
+                hours=item.hours,
+                notes=item.formatted_note,
+                external_reference=ext_ref,
+            )
+            item.status = SyncStatus.CREATED
+            item.harvest_entry_id = entry.id
+        except Exception as e:
+            item.status = SyncStatus.FAILED
+            item.error_message = str(e)
+
+    return plan.items
