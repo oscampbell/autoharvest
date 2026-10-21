@@ -56,6 +56,22 @@ def is_incident_already_logged(incident: AcknowledgedIncident, harvest_entries: 
     return None
 
 
+def is_alert_during_shift(
+    alert: AcknowledgedIncident,
+    shifts: list[PagerDutyShift],
+) -> tuple[bool, Optional[PagerDutyShift]]:
+    """
+    Check if an alert occurred during any of the user's scheduled on-call shifts.
+    Matches if either the event/trigger time or ack time falls within [shift.start, shift.end].
+    """
+    for shift in shifts:
+        if shift.start <= alert.event_time <= shift.end:
+            return True, shift
+        if shift.start <= alert.acknowledged_at <= shift.end:
+            return True, shift
+    return False, None
+
+
 def resolve_shift_window(
     pd_client: PagerDutyClient,
     user_id: str,
@@ -100,17 +116,24 @@ def create_sync_plan(
     tz: ZoneInfo = ZoneInfo("UTC"),
     window_hours: float = 1.0,
     chunk_days: float = 1.0,
+    filter_oncall_shifts: bool = True,
+    include_non_oncall: bool = False,
     progress_callback: Optional[Callable[[datetime, datetime, int], None]] = None,
 ) -> SyncPlan:
     """
     Fetch acknowledged alerts and existing Harvest entries, and construct a SyncPlan.
-    Applies the rule:
-    - Each alert creates 1 hour of bookable time.
+    Applies the rules:
+    - Filters alerts to only those that occurred during scheduled PagerDuty on-call shifts.
+    - Each on-call alert creates 1 hour of bookable time.
     - Any alerts that happen within that hour are ignored.
-    - The next bookable hour starts with the next alert that happens after the end of the first bookable hour.
+    - The next bookable hour starts with the next alert that happens after the end of the previous window.
     """
-    # Look back window_hours before 'since' to catch any active window that started prior to 'since'
     fetch_since = since - timedelta(hours=window_hours)
+
+    # 1. Fetch scheduled on-call shifts for this user in the window
+    shifts = pd_client.get_oncall_shifts(user_id=user_id, since=fetch_since, until=until)
+
+    # 2. Fetch acknowledged alerts
     all_incidents = pd_client.get_acknowledged_incidents(
         user_id=user_id,
         since=fetch_since,
@@ -119,23 +142,47 @@ def create_sync_plan(
         chunk_days=chunk_days,
         progress_callback=progress_callback,
     )
-    # Sort chronologically by event_time
     all_incidents.sort(key=lambda inc: inc.event_time)
 
-    # 2. Fetch existing Harvest entries for the window
+    # 3. Fetch existing Harvest entries for the window
     from_date = since.astimezone(tz).strftime("%Y-%m-%d")
     to_date = until.astimezone(tz).strftime("%Y-%m-%d")
     existing_entries = harvest_client.get_time_entries(from_date=from_date, to_date=to_date)
 
-    # 3. Apply 1-hour windowing
+    # 4. Apply on-call shift filtering and 1-hour windowing
     items: list[SyncItem] = []
     current_window_end: Optional[datetime] = None
     window_source: Optional[AcknowledgedIncident] = None
+    non_oncall_count = 0
 
     for inc in all_incidents:
         alert_time = inc.event_time
         in_requested_range = alert_time >= since
 
+        # Filter: was the user scheduled on-call when this alert occurred?
+        if filter_oncall_shifts:
+            is_oncall, matching_shift = (
+                is_alert_during_shift(inc, shifts) if shifts else (False, None)
+            )
+        else:
+            is_oncall, matching_shift = True, None
+
+        if not is_oncall:
+            # Alert occurred outside of on-call hours (e.g. normal working day or week off)
+            if in_requested_range:
+                non_oncall_count += 1
+                if include_non_oncall:
+                    items.append(
+                        SyncItem(
+                            incident=inc,
+                            hours=0.0,
+                            status=SyncStatus.IGNORED_NOT_ONCALL,
+                            shift=None,
+                        )
+                    )
+            continue
+
+        # Alert occurred during an on-call shift!
         if current_window_end is None or alert_time >= current_window_end:
             # Starts a new bookable window!
             current_window_end = alert_time + timedelta(hours=window_hours)
@@ -150,6 +197,7 @@ def create_sync_plan(
                             hours=existing.hours,
                             status=SyncStatus.ALREADY_LOGGED,
                             harvest_entry_id=existing.id,
+                            shift=matching_shift,
                         )
                     )
                 else:
@@ -158,6 +206,7 @@ def create_sync_plan(
                             incident=inc,
                             hours=hours_per_alert,
                             status=SyncStatus.PENDING_CREATION,
+                            shift=matching_shift,
                         )
                     )
         else:
@@ -169,6 +218,7 @@ def create_sync_plan(
                         hours=0.0,
                         status=SyncStatus.IGNORED_WINDOW,
                         ignored_by_incident=window_source,
+                        shift=matching_shift,
                     )
                 )
 
@@ -179,6 +229,8 @@ def create_sync_plan(
         project_id=project_id,
         task_id=task_id,
         hours_per_alert=hours_per_alert,
+        shifts=shifts,
+        non_oncall_ignored_count=non_oncall_count,
     )
 
 

@@ -141,6 +141,7 @@ def test_create_sync_plan_dedup_and_calculation():
         project_id=50,
         task_id=60,
         hours_per_alert=1.0,
+        filter_oncall_shifts=False,
     )
 
     assert len(plan.items) == 2
@@ -154,6 +155,104 @@ def test_create_sync_plan_dedup_and_calculation():
 
     assert plan.total_pending_hours == 1.0
     assert plan.total_logged_hours == 1.0
+
+
+def test_shift_filtering_only_books_during_oncall():
+    """
+    Test user requirement:
+    - On call hours are 1am-8am
+    - Working hours 1pm-5:30pm (alerts acked here are NOT bookable)
+    - Alerts outside on-call shifts are ignored!
+    """
+    pd_mock = MagicMock()
+    harvest_mock = MagicMock()
+    harvest_mock.get_time_entries.return_value = []
+
+    tz = ZoneInfo("UTC")
+    # Shift: 01:00 to 08:00 on 2026-08-29
+    shift_start = datetime(2026, 8, 29, 1, 0, tzinfo=tz)
+    shift_end = datetime(2026, 8, 29, 8, 0, tzinfo=tz)
+    from autoharvest.models import PagerDutyShift
+    shift = PagerDutyShift(
+        start=shift_start,
+        end=shift_end,
+        schedule_id="SCHED1",
+        schedule_summary="1am-8am Night Shift",
+        user_id="U1",
+    )
+    pd_mock.get_oncall_shifts.return_value = [shift]
+
+    # Alert 1: 04:43 (Inside shift -> SHOULD BE BOOKED)
+    inc_oncall = AcknowledgedIncident(
+        incident_id="PD_ONCALL",
+        incident_number=101,
+        title="Night Alert",
+        service_name="Webservers",
+        urgency="high",
+        html_url="https://pd/101",
+        acknowledged_at=datetime(2026, 8, 29, 4, 43, tzinfo=tz),
+        spent_date="2026-08-29",
+        log_entry_id="L1",
+        incident_created_at=datetime(2026, 8, 29, 4, 43, tzinfo=tz),
+    )
+
+    # Alert 2: 15:30 (Daytime 3:30pm -> NOT ON CALL -> MUST BE IGNORED)
+    inc_daytime = AcknowledgedIncident(
+        incident_id="PD_DAYTIME",
+        incident_number=102,
+        title="Daytime Alert",
+        service_name="Webservers",
+        urgency="high",
+        html_url="https://pd/102",
+        acknowledged_at=datetime(2026, 8, 29, 15, 30, tzinfo=tz),
+        spent_date="2026-08-29",
+        log_entry_id="L2",
+        incident_created_at=datetime(2026, 8, 29, 15, 30, tzinfo=tz),
+    )
+
+    pd_mock.get_acknowledged_incidents.return_value = [inc_oncall, inc_daytime]
+
+    # 1. By default, daytime alert is excluded from items to prevent table clutter
+    plan = create_sync_plan(
+        pd_client=pd_mock,
+        harvest_client=harvest_mock,
+        user_id="U1",
+        since=datetime(2026, 8, 29, 0, 0, tzinfo=tz),
+        until=datetime(2026, 8, 29, 23, 59, tzinfo=tz),
+        project_id=1,
+        task_id=2,
+        filter_oncall_shifts=True,
+        include_non_oncall=False,
+    )
+
+    assert len(plan.items) == 1
+    assert plan.items[0].incident.incident_id == "PD_ONCALL"
+    assert plan.items[0].status == SyncStatus.PENDING_CREATION
+    assert plan.items[0].hours == 1.0
+    assert plan.non_oncall_ignored_count == 1
+    assert plan.total_pending_hours == 1.0
+
+    # 2. With include_non_oncall=True, daytime alert is shown with status IGNORED_NOT_ONCALL and 0.0 hours
+    plan_with_non_oncall = create_sync_plan(
+        pd_client=pd_mock,
+        harvest_client=harvest_mock,
+        user_id="U1",
+        since=datetime(2026, 8, 29, 0, 0, tzinfo=tz),
+        until=datetime(2026, 8, 29, 23, 59, tzinfo=tz),
+        project_id=1,
+        task_id=2,
+        filter_oncall_shifts=True,
+        include_non_oncall=True,
+    )
+
+    assert len(plan_with_non_oncall.items) == 2
+    assert plan_with_non_oncall.items[0].incident.incident_id == "PD_ONCALL"
+    assert plan_with_non_oncall.items[0].status == SyncStatus.PENDING_CREATION
+
+    assert plan_with_non_oncall.items[1].incident.incident_id == "PD_DAYTIME"
+    assert plan_with_non_oncall.items[1].status == SyncStatus.IGNORED_NOT_ONCALL
+    assert plan_with_non_oncall.items[1].hours == 0.0
+    assert plan_with_non_oncall.total_pending_hours == 1.0
 
 
 def test_sohonet_tableau_note_format():
@@ -229,6 +328,7 @@ def test_one_hour_windowing_algorithm():
         task_id=2,
         hours_per_alert=1.0,
         tz=tz,
+        filter_oncall_shifts=False,
     )
 
     assert len(plan.items) == 6

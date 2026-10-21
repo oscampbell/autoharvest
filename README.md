@@ -132,10 +132,12 @@ autoharvest sync --shift --hours-per-alert 0.5 --apply
 
 ### `sync` Options
 
-- `--shift`: Automatically find your most recent on-call shift window.
 - `--days <N>`: Look back N days (default: 7).
+- `--shift`: Auto-detect and sync only your most recent on-call shift window.
 - `--since <DATE>`: Start date/time (ISO 8601 or `YYYY-MM-DD`).
 - `--until <DATE>`: End date/time (ISO 8601 or `YYYY-MM-DD`).
+- `--show-non-oncall`: Include daytime / non-oncall alerts in the preview table (marked as ignored).
+- `--all-alerts`: Process all acknowledged alerts without filtering to scheduled on-call shifts.
 - `--hours-per-alert <FLOAT>`: Override hours per alert (default from `.env` or 1.0).
 - `--project-id <INT>`: Override Harvest Project ID.
 - `--task-id <INT>`: Override Harvest Task ID.
@@ -147,13 +149,14 @@ autoharvest sync --shift --hours-per-alert 0.5 --apply
 
 ## How It Works
 
-1. **PagerDuty Log Entries**: Queries `GET /log_entries?is_overview=true` within the given timeframe, filtering for entries where `type == "acknowledge_log_entry"` and `agent.id == YOUR_USER_ID`.
-2. **1-Hour Windowing**:
-   - The first alert initiates a 1-hour bookable window (1.0 hour).
+1. **PagerDuty On-Call Schedule Verification**: Queries `GET /oncalls` to retrieve all scheduled on-call shifts for you during the requested timeframe. Any alerts you acknowledged during normal working hours or weeks off are automatically ignored.
+2. **PagerDuty Log Entries**: Queries `GET /log_entries?is_overview=true` in 1-day chunks, filtering for entries where `type == "acknowledge_log_entry"` and `agent.id == YOUR_USER_ID`.
+3. **1-Hour Windowing**:
+   - The first alert during an on-call shift initiates a 1-hour bookable window (1.0 hour).
    - Any subsequent alerts that happen within that 1-hour window are ignored (0.0 hours).
    - The next bookable hour starts with the next alert that occurs after the end of the previous bookable hour.
-3. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident matches via `external_reference.id` and note prefix (`PG#<IncidentNo.>`).
-4. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
+4. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident matches via `external_reference.id` and note prefix (`PG#<IncidentNo.>`).
+5. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
    - `spent_date`: Date the alert occurred (in your local timezone)
    - `hours`: 1.0 hour
    - `notes`: `PG#<IncidentNo.> - <Impacted Service> - <Summary>` (e.g. `PG#267540 - Webservers - SSL Certificate for www.sohonet.com due to expire soon`)

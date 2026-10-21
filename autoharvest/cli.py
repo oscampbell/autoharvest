@@ -299,6 +299,8 @@ def setup_cmd(ctx: click.Context) -> None:
 @click.option("--task-id", type=int, default=None, help="Override Harvest Task ID.")
 @click.option("--apply", "-y", "apply_changes", is_flag=True, default=False, help="Submit changes to Harvest directly.")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without making any changes.")
+@click.option("--all-alerts", is_flag=True, default=False, help="Process all acknowledged alerts without filtering to scheduled on-call shifts.")
+@click.option("--show-non-oncall", is_flag=True, default=False, help="Include alerts that occurred outside on-call shifts in the preview table.")
 @click.pass_context
 def sync_cmd(
     ctx: click.Context,
@@ -311,6 +313,8 @@ def sync_cmd(
     task_id: Optional[int],
     apply_changes: bool,
     dry_run: bool,
+    all_alerts: bool,
+    show_non_oncall: bool,
 ) -> None:
     """Sync acknowledged PagerDuty alerts to Harvest time tracking."""
     print_banner()
@@ -397,16 +401,33 @@ def sync_cmd(
                 task_id=effective_task_id,
                 hours_per_alert=effective_hours,
                 tz=tz,
+                filter_oncall_shifts=not all_alerts,
+                include_non_oncall=show_non_oncall,
                 progress_callback=update_progress,
             )
         except Exception as e:
             console.print(f"[bold red]Sync analysis failed:[/] {e}")
             raise click.Abort()
 
-    if not plan.items:
+    if not all_alerts and not plan.shifts:
         console.print(
-            f"\n[green]✓ No alerts were acknowledged by {pd_user.name} during this period.[/]"
+            f"\n[yellow]Notice: No scheduled on-call shifts found for {pd_user.name} during this period.[/yellow]"
         )
+        console.print(
+            "[dim]If your team does not use PagerDuty on-call schedules, pass [bold]--all-alerts[/bold] to process all acknowledged alerts.[/dim]\n"
+        )
+
+    if not plan.items:
+        if plan.non_oncall_ignored_count > 0:
+            console.print(
+                f"\n[yellow]Found {plan.non_oncall_ignored_count} alert(s) acknowledged by {pd_user.name}, "
+                f"but none occurred during scheduled on-call shifts.[/yellow]"
+            )
+            console.print("[dim]Use [bold]--show-non-oncall[/bold] to inspect them or [bold]--all-alerts[/bold] to book regardless of shifts.[/dim]")
+        else:
+            console.print(
+                f"\n[green]✓ No alerts were acknowledged by {pd_user.name} during this period.[/]"
+            )
         return
 
     # If explicit dry-run or no apply flag

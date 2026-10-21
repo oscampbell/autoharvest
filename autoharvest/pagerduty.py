@@ -84,42 +84,62 @@ class PagerDutyClient:
         since: datetime,
         until: datetime,
     ) -> list[PagerDutyShift]:
-        """Fetch on-call shifts for a user within a time range."""
-        params = {
-            "user_ids[]": user_id,
-            "since": since.isoformat(),
-            "until": until.isoformat(),
-            "earliest": "true",
-            "limit": 100,
-        }
-        data = self._request("GET", "/oncalls", params=params)
-        oncalls = data.get("oncalls", [])
+        """
+        Fetch all on-call shifts for a user within a time range.
+        Paginates through /oncalls to get the complete schedule history.
+        """
+        limit = 100
+        offset = 0
+        more = True
         shifts: list[PagerDutyShift] = []
 
-        for item in oncalls:
-            start_str = item.get("start")
-            end_str = item.get("end")
-            if not start_str or not end_str:
-                continue
-            
-            # PagerDuty returns ISO 8601 strings (e.g. 2026-10-15T09:00:00Z)
-            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            sched = item.get("schedule", {})
+        while more and offset < 10000:
+            params = {
+                "user_ids[]": user_id,
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+                "limit": limit,
+                "offset": offset,
+            }
+            data = self._request("GET", "/oncalls", params=params)
+            oncalls = data.get("oncalls", [])
+            more = data.get("more", False)
+            offset += limit
 
-            shifts.append(
-                PagerDutyShift(
-                    start=start_dt,
-                    end=end_dt,
-                    schedule_id=sched.get("id"),
-                    schedule_summary=sched.get("summary"),
-                    user_id=item.get("user", {}).get("id", user_id),
+            for item in oncalls:
+                start_str = item.get("start")
+                end_str = item.get("end")
+                if not start_str or not end_str:
+                    continue
+
+                # PagerDuty returns ISO 8601 strings (e.g. 2026-10-15T09:00:00Z)
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                sched = item.get("schedule", {})
+
+                shifts.append(
+                    PagerDutyShift(
+                        start=start_dt,
+                        end=end_dt,
+                        schedule_id=sched.get("id"),
+                        schedule_summary=sched.get("summary"),
+                        user_id=item.get("user", {}).get("id", user_id),
+                    )
                 )
-            )
 
-        # Sort shifts chronologically
-        shifts.sort(key=lambda s: s.start)
-        return shifts
+            if len(oncalls) < limit:
+                break
+
+        # Deduplicate identical shifts across escalation levels
+        unique_shifts: list[PagerDutyShift] = []
+        seen = set()
+        for s in sorted(shifts, key=lambda x: (x.start, x.end)):
+            key = (s.start, s.end, s.schedule_id)
+            if key not in seen:
+                seen.add(key)
+                unique_shifts.append(s)
+
+        return unique_shifts
 
     def get_acknowledged_incidents(
         self,

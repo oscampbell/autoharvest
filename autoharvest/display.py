@@ -124,6 +124,9 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
             by_ref = f"PG#{by_inc.incident_number}" if by_inc else "prior alert"
             status_badge = f"[dim]⚡ Ignored (<1h since {by_ref})[/]"
             hours_str = "[dim]0.00h[/]"
+        elif item.status == SyncStatus.IGNORED_NOT_ONCALL:
+            status_badge = "[dim]🚫 Not On-Call (Outside shift)[/]"
+            hours_str = "[dim]0.00h[/]"
         elif item.status == SyncStatus.PENDING_CREATION:
             if is_dry_run:
                 status_badge = "[bold yellow]⏳ Ready to Log[/]"
@@ -161,15 +164,25 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
     bookable_count = pending_count + already_count
     total_bookable_hours = pending_hours + already_hours
 
-    summary_text = (
-        f"• [bold]Total Acknowledged Alerts in Range:[/] {total_count}\n"
-        f"• [bold green]Bookable Alerts:[/] {bookable_count} alert(s) ({total_bookable_hours:.2f} hours)\n"
-        f"  ├─ [bold cyan]Already Logged in Harvest:[/] {already_count} alert(s) ({already_hours:.2f} hours)\n"
-        f"  └─ [bold yellow]New Alerts to Log:[/] {pending_count} alert(s) ({pending_hours:.2f} hours)\n"
-        f"• [dim]Ignored Alerts (Within 1h of prior alert):[/] {ignored_count} alert(s) (0.00 hours)\n"
-        f"• [bold]Harvest Destination:[/] Project ID [cyan]{plan.project_id}[/], Task ID [green]{plan.task_id}[/]\n"
-        f"• [bold]Naming Convention:[/] [italic]PG#IncidentNo. - Impacted Service - Summary[/]"
-    )
+    summary_lines = []
+    if plan.shifts:
+        summary_lines.append(f"• [bold]Scheduled On-Call Shifts Found:[/] {len(plan.shifts)} shift(s)")
+    summary_lines.extend([
+        f"• [bold green]Bookable On-Call Alerts:[/] {bookable_count} alert(s) ({total_bookable_hours:.2f} hours)",
+        f"  ├─ [bold cyan]Already Logged in Harvest:[/] {already_count} alert(s) ({already_hours:.2f} hours)",
+        f"  └─ [bold yellow]New Alerts to Log:[/] {pending_count} alert(s) ({pending_hours:.2f} hours)",
+        f"• [dim]Ignored Alerts (Within 1h of on-call alert):[/] {ignored_count} alert(s) (0.00 hours)",
+    ])
+    if plan.non_oncall_ignored_count > 0:
+        summary_lines.append(
+            f"• [dim]Ignored Alerts (Outside Scheduled On-Call Shifts):[/] {plan.non_oncall_ignored_count} alert(s)"
+        )
+    summary_lines.extend([
+        f"• [bold]Harvest Destination:[/] Project ID [cyan]{plan.project_id}[/], Task ID [green]{plan.task_id}[/]",
+        f"• [bold]Naming Convention:[/] [italic]PG#IncidentNo. - Impacted Service - Summary[/]",
+    ])
+
+    summary_text = "\n".join(summary_lines)
 
     if is_dry_run:
         border_style = "yellow"

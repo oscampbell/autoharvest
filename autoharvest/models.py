@@ -10,6 +10,7 @@ class SyncStatus(str, Enum):
     PENDING_CREATION = "pending"
     ALREADY_LOGGED = "already_logged"
     IGNORED_WINDOW = "ignored_window"
+    IGNORED_NOT_ONCALL = "not_oncall"
     CREATED = "created"
     FAILED = "failed"
 
@@ -96,6 +97,7 @@ class SyncItem:
     status: SyncStatus
     harvest_entry_id: Optional[int] = None
     ignored_by_incident: Optional[AcknowledgedIncident] = None
+    shift: Optional[PagerDutyShift] = None
     error_message: Optional[str] = None
 
     @property
@@ -114,6 +116,12 @@ class SyncPlan:
     project_id: int
     task_id: int
     hours_per_alert: float = 1.0
+    shifts: list[PagerDutyShift] = field(default_factory=list)
+    non_oncall_ignored_count: int = 0
+
+    @property
+    def oncall_items(self) -> list[SyncItem]:
+        return [item for item in self.items if item.status != SyncStatus.IGNORED_NOT_ONCALL]
 
     @property
     def pending_items(self) -> list[SyncItem]:
@@ -128,8 +136,16 @@ class SyncPlan:
         return [item for item in self.items if item.status == SyncStatus.IGNORED_WINDOW]
 
     @property
+    def not_oncall_items(self) -> list[SyncItem]:
+        return [item for item in self.items if item.status == SyncStatus.IGNORED_NOT_ONCALL]
+
+    @property
     def bookable_items(self) -> list[SyncItem]:
-        return [item for item in self.items if item.status != SyncStatus.IGNORED_WINDOW]
+        return [
+            item
+            for item in self.items
+            if item.status in (SyncStatus.PENDING_CREATION, SyncStatus.ALREADY_LOGGED)
+        ]
 
     @property
     def total_pending_hours(self) -> float:
