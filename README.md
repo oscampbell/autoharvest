@@ -9,11 +9,13 @@ When you finish an on-call shift or want to log your weekly on-call hours, `auto
 ## Features
 
 - **Accurate Acknowledged Alert Tracking**: Queries PagerDuty's incident audit trail (`/log_entries`) to find all incidents you personally acknowledged, rather than only open or currently assigned ones.
-- **Configurable Flat Time Per Alert**: Credit a fixed duration (e.g. 1.0 hour, 0.5 hour) per acknowledged alert.
-- **Duplicate Prevention (100% Idempotent)**: Checks existing Harvest time entries using incident tags (`[PD-XXXXX]`) and external reference links. Running the script multiple times will never double-count hours.
+- **1-Hour Bookable Windows**: Each initial alert creates 1 hour of bookable time. Any alerts that occur within that hour are automatically ignored/suppressed. The next bookable hour starts with the next alert that occurs after the end of the previous window.
+- **Tableau-Compatible Naming Convention**: Formats time entry notes strictly as required for Tableau analytics:
+  `PG#<IncidentNo.> - <Impacted Service> - <Summary>` (e.g. `PG#267540 - Webservers - SSL Certificate for www.sohonet.com due to expire soon`).
+- **Duplicate Prevention (100% Idempotent)**: Checks existing Harvest time entries using `PG#<IncidentNo.>` tags and external reference links. Running the script multiple times will never double-count hours.
 - **Safe Dry-Run by Default**: Shows a rich terminal table with incident numbers, titles, services, and timestamps before prompting to create entries.
 - **Shift Auto-Detection**: Use `--shift` to automatically look up your most recent on-call shift window from PagerDuty.
-- **Interactive Setup**: Run `autoharvest setup` to configure your tokens, test connections, and pick your Harvest project/task from an interactive menu.
+- **Interactive Setup**: Run `autoharvest setup` to configure your tokens, test connections, and auto-detect your Harvest on-call task (*Active On-Call time related to non-customer impacting Pagerduty alerts*).
 
 ---
 
@@ -146,12 +148,15 @@ autoharvest sync --shift --hours-per-alert 0.5 --apply
 ## How It Works
 
 1. **PagerDuty Log Entries**: Queries `GET /log_entries?is_overview=true` within the given timeframe, filtering for entries where `type == "acknowledge_log_entry"` and `agent.id == YOUR_USER_ID`.
-2. **Deduplication**: If an incident was acknowledged multiple times, only the earliest acknowledgment is counted.
-3. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident ID matches via `external_reference.id` and note tags (`[PD-XXXXX]`).
-4. **Time Entry Creation**: For any unlogged alert, creates an entry in Harvest via `POST /v2/time_entries` with:
-   - `spent_date`: Date the alert was acknowledged (in your local timezone)
-   - `hours`: Configured flat hours per alert
-   - `notes`: `PagerDuty Incident #1234: <Title> [PD-PT4KHLK]`
+2. **1-Hour Windowing**:
+   - The first alert initiates a 1-hour bookable window (1.0 hour).
+   - Any subsequent alerts that happen within that 1-hour window are ignored (0.0 hours).
+   - The next bookable hour starts with the next alert that occurs after the end of the previous bookable hour.
+3. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident matches via `external_reference.id` and note prefix (`PG#<IncidentNo.>`).
+4. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
+   - `spent_date`: Date the alert occurred (in your local timezone)
+   - `hours`: 1.0 hour
+   - `notes`: `PG#<IncidentNo.> - <Impacted Service> - <Summary>` (e.g. `PG#267540 - Webservers - SSL Certificate for www.sohonet.com due to expire soon`)
    - `external_reference`: `{ id: "PT4KHLK", permalink: "..." }`
 
 ---

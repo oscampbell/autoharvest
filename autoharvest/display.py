@@ -105,37 +105,48 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
     table = Table(title=title, show_header=True, header_style="bold white on navy_blue")
 
     table.add_column("Status", justify="center")
-    table.add_column("Ack Date/Time", style="cyan")
-    table.add_column("Incident #", style="bold yellow", justify="right")
+    table.add_column("Alert Time", style="cyan")
+    table.add_column("Incident Ref", style="bold yellow")
     table.add_column("Title / Summary")
     table.add_column("Service", style="magenta")
     table.add_column("Hours", justify="right", style="bold green")
 
     for item in plan.items:
         inc = item.incident
-        ack_str = inc.acknowledged_at.strftime("%Y-%m-%d %H:%M")
+        alert_time_str = inc.event_time.strftime("%Y-%m-%d %H:%M")
+        inc_ref = f"PG#{inc.incident_number}"
 
         if item.status == SyncStatus.ALREADY_LOGGED:
             status_badge = f"[dim cyan]✓ Already Logged (ID {item.harvest_entry_id})[/]"
+            hours_str = f"[dim]{item.hours:.2f}h[/]"
+        elif item.status == SyncStatus.IGNORED_WINDOW:
+            by_inc = item.ignored_by_incident
+            by_ref = f"PG#{by_inc.incident_number}" if by_inc else "prior alert"
+            status_badge = f"[dim]⚡ Ignored (<1h since {by_ref})[/]"
+            hours_str = "[dim]0.00h[/]"
         elif item.status == SyncStatus.PENDING_CREATION:
             if is_dry_run:
                 status_badge = "[bold yellow]⏳ Ready to Log[/]"
             else:
                 status_badge = "[bold yellow]Creating...[/]"
+            hours_str = f"[bold green]{item.hours:.2f}h[/]"
         elif item.status == SyncStatus.CREATED:
             status_badge = f"[bold green]✓ Created (ID {item.harvest_entry_id})[/]"
+            hours_str = f"[bold green]{item.hours:.2f}h[/]"
         elif item.status == SyncStatus.FAILED:
-            status_badge = f"[bold red]✗ Failed[/]"
+            status_badge = "[bold red]✗ Failed[/]"
+            hours_str = f"[bold red]{item.hours:.2f}h[/]"
         else:
             status_badge = str(item.status)
+            hours_str = f"{item.hours:.2f}h"
 
         table.add_row(
             status_badge,
-            ack_str,
-            str(inc.incident_number),
+            alert_time_str,
+            inc_ref,
             inc.title,
             inc.service_name,
-            f"{item.hours:.2f}h",
+            hours_str,
         )
 
     console.print(table)
@@ -144,15 +155,20 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
     total_count = len(plan.items)
     pending_count = len(plan.pending_items)
     already_count = len(plan.already_logged_items)
+    ignored_count = len(plan.ignored_items)
     pending_hours = plan.total_pending_hours
     already_hours = plan.total_logged_hours
+    bookable_count = pending_count + already_count
+    total_bookable_hours = pending_hours + already_hours
 
     summary_text = (
-        f"• [bold]Total Acknowledged Alerts:[/] {total_count}\n"
-        f"• [bold cyan]Already Logged in Harvest:[/] {already_count} alert(s) ({already_hours:.2f} hours)\n"
-        f"• [bold yellow]New Alerts to Log:[/] {pending_count} alert(s) ({pending_hours:.2f} hours)\n"
+        f"• [bold]Total Acknowledged Alerts in Range:[/] {total_count}\n"
+        f"• [bold green]Bookable Alerts:[/] {bookable_count} alert(s) ({total_bookable_hours:.2f} hours)\n"
+        f"  ├─ [bold cyan]Already Logged in Harvest:[/] {already_count} alert(s) ({already_hours:.2f} hours)\n"
+        f"  └─ [bold yellow]New Alerts to Log:[/] {pending_count} alert(s) ({pending_hours:.2f} hours)\n"
+        f"• [dim]Ignored Alerts (Within 1h of prior alert):[/] {ignored_count} alert(s) (0.00 hours)\n"
         f"• [bold]Harvest Destination:[/] Project ID [cyan]{plan.project_id}[/], Task ID [green]{plan.task_id}[/]\n"
-        f"• [bold]Hours Per Alert:[/] {plan.hours_per_alert:.2f} hr(s)"
+        f"• [bold]Naming Convention:[/] [italic]PG#IncidentNo. - Impacted Service - Summary[/]"
     )
 
     if is_dry_run:

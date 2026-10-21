@@ -9,6 +9,7 @@ from typing import Optional
 class SyncStatus(str, Enum):
     PENDING_CREATION = "pending"
     ALREADY_LOGGED = "already_logged"
+    IGNORED_WINDOW = "ignored_window"
     CREATED = "created"
     FAILED = "failed"
 
@@ -41,6 +42,12 @@ class AcknowledgedIncident:
     acknowledged_at: datetime
     spent_date: str  # YYYY-MM-DD
     log_entry_id: str
+    incident_created_at: Optional[datetime] = None
+
+    @property
+    def event_time(self) -> datetime:
+        """Timestamp when the alert occurred (incident trigger time if available, otherwise ack time)."""
+        return self.incident_created_at or self.acknowledged_at
 
 
 @dataclass
@@ -88,14 +95,15 @@ class SyncItem:
     hours: float
     status: SyncStatus
     harvest_entry_id: Optional[int] = None
+    ignored_by_incident: Optional[AcknowledgedIncident] = None
     error_message: Optional[str] = None
 
     @property
     def formatted_note(self) -> str:
-        return (
-            f"PagerDuty Incident #{self.incident.incident_number}: "
-            f"{self.incident.title} [PD-{self.incident.incident_id}]"
-        )
+        inc_num = str(self.incident.incident_number).strip()
+        service = self.incident.service_name.strip()
+        summary = self.incident.title.strip().replace("\r\n", " ").replace("\n", " ")
+        return f"PG#{inc_num} - {service} - {summary}"
 
 
 @dataclass
@@ -105,7 +113,7 @@ class SyncPlan:
     items: list[SyncItem]
     project_id: int
     task_id: int
-    hours_per_alert: float
+    hours_per_alert: float = 1.0
 
     @property
     def pending_items(self) -> list[SyncItem]:
@@ -114,6 +122,14 @@ class SyncPlan:
     @property
     def already_logged_items(self) -> list[SyncItem]:
         return [item for item in self.items if item.status == SyncStatus.ALREADY_LOGGED]
+
+    @property
+    def ignored_items(self) -> list[SyncItem]:
+        return [item for item in self.items if item.status == SyncStatus.IGNORED_WINDOW]
+
+    @property
+    def bookable_items(self) -> list[SyncItem]:
+        return [item for item in self.items if item.status != SyncStatus.IGNORED_WINDOW]
 
     @property
     def total_pending_hours(self) -> float:

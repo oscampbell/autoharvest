@@ -172,14 +172,21 @@ class PagerDutyClient:
                     continue
 
                 ack_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                # Convert to target timezone for booking date
-                local_ack_dt = ack_dt.astimezone(tz)
-                spent_date = local_ack_dt.strftime("%Y-%m-%d")
+                inc_created_str = incident_data.get("created_at")
+                inc_created_dt = (
+                    datetime.fromisoformat(inc_created_str.replace("Z", "+00:00"))
+                    if inc_created_str
+                    else None
+                )
+                event_dt = inc_created_dt or ack_dt
+                local_event_dt = event_dt.astimezone(tz)
+                spent_date = local_event_dt.strftime("%Y-%m-%d")
 
                 # If this incident was already seen, keep the earliest acknowledgment
                 if inc_id in incidents_by_id:
                     if ack_dt < incidents_by_id[inc_id].acknowledged_at:
                         incidents_by_id[inc_id].acknowledged_at = ack_dt
+                        incidents_by_id[inc_id].incident_created_at = inc_created_dt
                         incidents_by_id[inc_id].spent_date = spent_date
                         incidents_by_id[inc_id].log_entry_id = entry.get("id", "")
                     continue
@@ -194,11 +201,12 @@ class PagerDutyClient:
                     acknowledged_at=ack_dt,
                     spent_date=spent_date,
                     log_entry_id=entry.get("id", ""),
+                    incident_created_at=inc_created_dt,
                 )
 
             if len(entries) < limit:
                 break
 
         results = list(incidents_by_id.values())
-        results.sort(key=lambda x: x.acknowledged_at)
+        results.sort(key=lambda x: x.event_time)
         return results

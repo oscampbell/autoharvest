@@ -35,14 +35,18 @@ def is_incident_already_logged(incident: AcknowledgedIncident, harvest_entries: 
     Check if a PagerDuty incident has already been logged in Harvest.
     Matches via:
     1. external_reference_id == incident.incident_id
-    2. notes contain [PD-{incident_id}]
-    3. notes contain #{incident_number} and match spent_date
+    2. notes contain PG#{incident_number}
+    3. notes contain [PD-{incident_id}]
+    4. notes contain #{incident_number} and match spent_date
     """
+    pg_tag = f"PG#{incident.incident_number}"
     pd_tag = f"[PD-{incident.incident_id}]"
     inc_num_tag = f"#{incident.incident_number}"
 
     for entry in harvest_entries:
-        if entry.external_reference_id == incident.incident_id:
+        if entry.external_reference_id and entry.external_reference_id == incident.incident_id:
+            return entry
+        if pg_tag in entry.notes:
             return entry
         if pd_tag in entry.notes:
             return entry
@@ -94,45 +98,75 @@ def create_sync_plan(
     task_id: int,
     hours_per_alert: float = 1.0,
     tz: ZoneInfo = ZoneInfo("UTC"),
+    window_hours: float = 1.0,
 ) -> SyncPlan:
     """
     Fetch acknowledged alerts and existing Harvest entries, and construct a SyncPlan.
+    Applies the rule:
+    - Each alert creates 1 hour of bookable time.
+    - Any alerts that happen within that hour are ignored.
+    - The next bookable hour starts with the next alert that happens after the end of the first bookable hour.
     """
-    # 1. Fetch acknowledged incidents
-    incidents = pd_client.get_acknowledged_incidents(
+    # Look back window_hours before 'since' to catch any active window that started prior to 'since'
+    fetch_since = since - timedelta(hours=window_hours)
+    all_incidents = pd_client.get_acknowledged_incidents(
         user_id=user_id,
-        since=since,
+        since=fetch_since,
         until=until,
         tz=tz,
     )
+    # Sort chronologically by event_time
+    all_incidents.sort(key=lambda inc: inc.event_time)
 
     # 2. Fetch existing Harvest entries for the window
-    # Harvest accepts YYYY-MM-DD
     from_date = since.astimezone(tz).strftime("%Y-%m-%d")
     to_date = until.astimezone(tz).strftime("%Y-%m-%d")
     existing_entries = harvest_client.get_time_entries(from_date=from_date, to_date=to_date)
 
-    # 3. Build sync items
+    # 3. Apply 1-hour windowing
     items: list[SyncItem] = []
-    for inc in incidents:
-        existing = is_incident_already_logged(inc, existing_entries)
-        if existing:
-            items.append(
-                SyncItem(
-                    incident=inc,
-                    hours=existing.hours,
-                    status=SyncStatus.ALREADY_LOGGED,
-                    harvest_entry_id=existing.id,
-                )
-            )
+    current_window_end: Optional[datetime] = None
+    window_source: Optional[AcknowledgedIncident] = None
+
+    for inc in all_incidents:
+        alert_time = inc.event_time
+        in_requested_range = alert_time >= since
+
+        if current_window_end is None or alert_time >= current_window_end:
+            # Starts a new bookable window!
+            current_window_end = alert_time + timedelta(hours=window_hours)
+            window_source = inc
+
+            if in_requested_range:
+                existing = is_incident_already_logged(inc, existing_entries)
+                if existing:
+                    items.append(
+                        SyncItem(
+                            incident=inc,
+                            hours=existing.hours,
+                            status=SyncStatus.ALREADY_LOGGED,
+                            harvest_entry_id=existing.id,
+                        )
+                    )
+                else:
+                    items.append(
+                        SyncItem(
+                            incident=inc,
+                            hours=hours_per_alert,
+                            status=SyncStatus.PENDING_CREATION,
+                        )
+                    )
         else:
-            items.append(
-                SyncItem(
-                    incident=inc,
-                    hours=hours_per_alert,
-                    status=SyncStatus.PENDING_CREATION,
+            # Within the active window of window_source -> ignored
+            if in_requested_range:
+                items.append(
+                    SyncItem(
+                        incident=inc,
+                        hours=0.0,
+                        status=SyncStatus.IGNORED_WINDOW,
+                        ignored_by_incident=window_source,
+                    )
                 )
-            )
 
     return SyncPlan(
         since=since,

@@ -233,12 +233,31 @@ def setup_cmd(ctx: click.Context) -> None:
     proj_default = str(cfg.harvest_project_id) if cfg.harvest_project_id else ""
     task_default = str(cfg.harvest_task_id) if cfg.harvest_task_id else ""
 
+    # Auto-detect target task for on-call (e.g. Active On-Call time related to non-customer impacting Pagerduty alerts)
+    target_needle = "non-customer impacting pagerduty alerts"
+    found_recommended = False
+    for p in projects:
+        for t in p.tasks:
+            if target_needle in t.name.lower() or "active on-call" in t.name.lower():
+                if not proj_default:
+                    proj_default = str(p.id)
+                if not task_default:
+                    task_default = str(t.id)
+                console.print(
+                    f"\n[bold green]★ Recommended Task Found:[/] [cyan]{p.name}[/] (ID: {p.id}) → "
+                    f"[green]{t.name}[/] (ID: {t.id})"
+                )
+                found_recommended = True
+                break
+        if found_recommended:
+            break
+
     chosen_proj_id = Prompt.ask(
         "\nEnter the [bold cyan]Project ID[/] to log on-call hours against",
         default=proj_default,
     )
     chosen_task_id = Prompt.ask(
-        "Enter the [bold green]Task ID[/] to log on-call hours against (e.g. On-Call Support)",
+        "Enter the [bold green]Task ID[/] to log on-call hours against",
         default=task_default,
     )
 
