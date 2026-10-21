@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from autoharvest.harvest import HarvestClient
@@ -99,6 +99,8 @@ def create_sync_plan(
     hours_per_alert: float = 1.0,
     tz: ZoneInfo = ZoneInfo("UTC"),
     window_hours: float = 1.0,
+    chunk_days: float = 1.0,
+    progress_callback: Optional[Callable[[datetime, datetime, int], None]] = None,
 ) -> SyncPlan:
     """
     Fetch acknowledged alerts and existing Harvest entries, and construct a SyncPlan.
@@ -114,6 +116,8 @@ def create_sync_plan(
         since=fetch_since,
         until=until,
         tz=tz,
+        chunk_days=chunk_days,
+        progress_callback=progress_callback,
     )
     # Sort chronologically by event_time
     all_incidents.sort(key=lambda inc: inc.event_time)

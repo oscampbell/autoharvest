@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timedelta
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 import requests
 
@@ -127,85 +127,99 @@ class PagerDutyClient:
         since: datetime,
         until: datetime,
         tz: ZoneInfo = ZoneInfo("UTC"),
+        chunk_days: float = 1.0,
+        progress_callback: Optional[Any] = None,
     ) -> list[AcknowledgedIncident]:
         """
         Fetch all incidents acknowledged by the user between `since` and `until`.
-        Queries /log_entries and filters by type=acknowledge_log_entry and agent.id=user_id.
+        Chunks requests by `chunk_days` (default: 1 day) to avoid PagerDuty's
+        hard 10,000 offset limit (Offset must be less than 10001).
         Deduplicates if the same incident was acknowledged multiple times.
         """
         limit = 100
-        offset = 0
-        more = True
+        chunk_delta = timedelta(days=chunk_days)
         incidents_by_id: dict[str, AcknowledgedIncident] = {}
 
-        while more:
-            params = {
-                "since": since.isoformat(),
-                "until": until.isoformat(),
-                "is_overview": "true",
-                "include[]": "incidents",
-                "limit": limit,
-                "offset": offset,
-            }
+        current_start = since
+        while current_start < until:
+            current_end = min(current_start + chunk_delta, until)
 
-            data = self._request("GET", "/log_entries", params=params)
-            entries = data.get("log_entries", [])
-            more = data.get("more", False)
-            offset += limit
+            if progress_callback:
+                progress_callback(current_start, current_end, len(incidents_by_id))
 
-            for entry in entries:
-                if entry.get("type") != "acknowledge_log_entry":
-                    continue
+            offset = 0
+            more = True
 
-                agent = entry.get("agent", {})
-                agent_id = agent.get("id")
-                if agent_id != user_id:
-                    continue
+            while more and offset < 10000:
+                params = {
+                    "since": current_start.isoformat(),
+                    "until": current_end.isoformat(),
+                    "is_overview": "true",
+                    "include[]": "incidents",
+                    "limit": limit,
+                    "offset": offset,
+                }
 
-                incident_data = entry.get("incident", {})
-                inc_id = incident_data.get("id")
-                if not inc_id:
-                    continue
+                data = self._request("GET", "/log_entries", params=params)
+                entries = data.get("log_entries", [])
+                more = data.get("more", False)
+                offset += limit
 
-                created_at_str = entry.get("created_at")
-                if not created_at_str:
-                    continue
+                for entry in entries:
+                    if entry.get("type") != "acknowledge_log_entry":
+                        continue
 
-                ack_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                inc_created_str = incident_data.get("created_at")
-                inc_created_dt = (
-                    datetime.fromisoformat(inc_created_str.replace("Z", "+00:00"))
-                    if inc_created_str
-                    else None
-                )
-                event_dt = inc_created_dt or ack_dt
-                local_event_dt = event_dt.astimezone(tz)
-                spent_date = local_event_dt.strftime("%Y-%m-%d")
+                    agent = entry.get("agent", {})
+                    agent_id = agent.get("id")
+                    if agent_id != user_id:
+                        continue
 
-                # If this incident was already seen, keep the earliest acknowledgment
-                if inc_id in incidents_by_id:
-                    if ack_dt < incidents_by_id[inc_id].acknowledged_at:
-                        incidents_by_id[inc_id].acknowledged_at = ack_dt
-                        incidents_by_id[inc_id].incident_created_at = inc_created_dt
-                        incidents_by_id[inc_id].spent_date = spent_date
-                        incidents_by_id[inc_id].log_entry_id = entry.get("id", "")
-                    continue
+                    incident_data = entry.get("incident", {})
+                    inc_id = incident_data.get("id")
+                    if not inc_id:
+                        continue
 
-                incidents_by_id[inc_id] = AcknowledgedIncident(
-                    incident_id=inc_id,
-                    incident_number=incident_data.get("incident_number", inc_id),
-                    title=incident_data.get("title") or incident_data.get("summary") or "Untitled Incident",
-                    service_name=incident_data.get("service", {}).get("summary", "Unknown Service"),
-                    urgency=incident_data.get("urgency", "high"),
-                    html_url=incident_data.get("html_url", f"https://api.pagerduty.com/incidents/{inc_id}"),
-                    acknowledged_at=ack_dt,
-                    spent_date=spent_date,
-                    log_entry_id=entry.get("id", ""),
-                    incident_created_at=inc_created_dt,
-                )
+                    created_at_str = entry.get("created_at")
+                    if not created_at_str:
+                        continue
 
-            if len(entries) < limit:
-                break
+                    ack_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                    inc_created_str = incident_data.get("created_at")
+                    inc_created_dt = (
+                        datetime.fromisoformat(inc_created_str.replace("Z", "+00:00"))
+                        if inc_created_str
+                        else None
+                    )
+                    event_dt = inc_created_dt or ack_dt
+                    local_event_dt = event_dt.astimezone(tz)
+                    spent_date = local_event_dt.strftime("%Y-%m-%d")
+
+                    # If this incident was already seen, keep the earliest acknowledgment
+                    if inc_id in incidents_by_id:
+                        if ack_dt < incidents_by_id[inc_id].acknowledged_at:
+                            incidents_by_id[inc_id].acknowledged_at = ack_dt
+                            incidents_by_id[inc_id].incident_created_at = inc_created_dt
+                            incidents_by_id[inc_id].spent_date = spent_date
+                            incidents_by_id[inc_id].log_entry_id = entry.get("id", "")
+                        continue
+
+                    incidents_by_id[inc_id] = AcknowledgedIncident(
+                        incident_id=inc_id,
+                        incident_number=incident_data.get("incident_number", inc_id),
+                        title=incident_data.get("title") or incident_data.get("summary") or "Untitled Incident",
+                        service_name=incident_data.get("service", {}).get("summary", "Unknown Service"),
+                        urgency=incident_data.get("urgency", "high"),
+                        html_url=incident_data.get("html_url", f"https://api.pagerduty.com/incidents/{inc_id}"),
+                        acknowledged_at=ack_dt,
+                        spent_date=spent_date,
+                        log_entry_id=entry.get("id", ""),
+                        incident_created_at=inc_created_dt,
+                    )
+
+                if len(entries) < limit:
+                    break
+
+            current_start = current_end
 
         results = list(incidents_by_id.values())
         results.sort(key=lambda x: x.event_time)

@@ -378,21 +378,30 @@ def sync_cmd(
         f"from {start_dt.strftime('%Y-%m-%d %H:%M')} to {end_dt.strftime('%Y-%m-%d %H:%M %Z')}...[/dim]"
     )
 
-    try:
-        plan = create_sync_plan(
-            pd_client=pd_client,
-            harvest_client=harvest_client,
-            user_id=pd_user.id,
-            since=start_dt,
-            until=end_dt,
-            project_id=effective_project_id,
-            task_id=effective_task_id,
-            hours_per_alert=effective_hours,
-            tz=tz,
-        )
-    except Exception as e:
-        console.print(f"[bold red]Sync analysis failed:[/] {e}")
-        raise click.Abort()
+    with console.status("[bold cyan]Scanning PagerDuty log entries...[/bold cyan]") as status:
+        def update_progress(chunk_start: datetime, chunk_end: datetime, count: int) -> None:
+            date_str = chunk_start.strftime("%Y-%m-%d")
+            status.update(
+                f"[bold cyan]Scanning PagerDuty log entries ({date_str})...[/bold cyan] "
+                f"[green](Found {count} acknowledged alert(s) so far)[/green]"
+            )
+
+        try:
+            plan = create_sync_plan(
+                pd_client=pd_client,
+                harvest_client=harvest_client,
+                user_id=pd_user.id,
+                since=start_dt,
+                until=end_dt,
+                project_id=effective_project_id,
+                task_id=effective_task_id,
+                hours_per_alert=effective_hours,
+                tz=tz,
+                progress_callback=update_progress,
+            )
+        except Exception as e:
+            console.print(f"[bold red]Sync analysis failed:[/] {e}")
+            raise click.Abort()
 
     if not plan.items:
         console.print(

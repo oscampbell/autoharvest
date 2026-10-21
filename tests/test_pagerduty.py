@@ -150,6 +150,7 @@ def test_get_acknowledged_incidents_filtering_and_dedup():
             since=since,
             until=until,
             tz=ZoneInfo("UTC"),
+            chunk_days=7.0,
         )
 
         assert len(incidents) == 2
@@ -162,6 +163,77 @@ def test_get_acknowledged_incidents_filtering_and_dedup():
         assert incidents[1].incident_id == "INC202"
         assert incidents[1].incident_number == 202
         assert incidents[1].spent_date == "2026-10-13"
+
+
+def test_get_acknowledged_incidents_chunking():
+    """Verify that multi-day queries are chunked cleanly without exceeding offset limits."""
+    client = PagerDutyClient(token="pd_test_tok")
+    since = datetime(2026, 10, 10, 0, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+
+    with responses.RequestsMock() as rsps:
+        # Day 1: 10-10 to 10-11
+        rsps.add(
+            responses.GET,
+            "https://api.pagerduty.com/log_entries",
+            json={
+                "log_entries": [
+                    {
+                        "id": "LOG1",
+                        "type": "acknowledge_log_entry",
+                        "created_at": "2026-10-10T12:00:00Z",
+                        "agent": {"id": "PUSER123", "type": "user_reference"},
+                        "incident": {
+                            "id": "INC1",
+                            "incident_number": 1,
+                            "title": "Alert Day 1",
+                        },
+                    }
+                ],
+                "more": False,
+            },
+            status=200,
+        )
+        # Day 2: 10-11 to 10-12
+        rsps.add(
+            responses.GET,
+            "https://api.pagerduty.com/log_entries",
+            json={
+                "log_entries": [
+                    {
+                        "id": "LOG2",
+                        "type": "acknowledge_log_entry",
+                        "created_at": "2026-10-11T12:00:00Z",
+                        "agent": {"id": "PUSER123", "type": "user_reference"},
+                        "incident": {
+                            "id": "INC2",
+                            "incident_number": 2,
+                            "title": "Alert Day 2",
+                        },
+                    }
+                ],
+                "more": False,
+            },
+            status=200,
+        )
+
+        progress_calls = []
+        def track_progress(start, end, count):
+            progress_calls.append((start, end, count))
+
+        incidents = client.get_acknowledged_incidents(
+            user_id="PUSER123",
+            since=since,
+            until=until,
+            tz=ZoneInfo("UTC"),
+            chunk_days=1.0,
+            progress_callback=track_progress,
+        )
+
+        assert len(incidents) == 2
+        assert len(progress_calls) == 2
+        assert incidents[0].incident_id == "INC1"
+        assert incidents[1].incident_id == "INC2"
 
 
 def test_pagerduty_auth_failure():
