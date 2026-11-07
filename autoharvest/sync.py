@@ -125,6 +125,56 @@ def resolve_shift_window(
     return chosen.start, min(chosen.end, now), chosen
 
 
+# How far before `since` the sync will look for a quiet gap that anchors the alert windows.
+MAX_CHAIN_LOOKBACK = timedelta(days=7)
+
+
+def _has_quiet_gap_before(
+    incidents: list[AcknowledgedIncident],
+    shifts: list[PagerDutyShift],
+    fetch_since: datetime,
+    since: datetime,
+    max_window: timedelta,
+    filter_oncall_shifts: bool,
+) -> bool:
+    """
+    True if the fetched alerts already contain a point that fixes the windowing before `since`:
+    either no on-call alerts before `since` at all, or the earliest one is at least one window
+    after `fetch_since` (so nothing earlier could have opened a window covering it).
+    """
+    earlier = [
+        inc for inc in incidents
+        if inc.event_time < since
+        and (not filter_oncall_shifts or is_alert_during_shift(inc, shifts)[0])
+    ]
+    if not earlier:
+        return True
+    first = min(inc.event_time for inc in earlier)
+    return first - fetch_since >= max_window
+
+
+def _merge_shifts(new: list[PagerDutyShift], existing: list[PagerDutyShift]) -> list[PagerDutyShift]:
+    seen = {(s.start, s.end, s.schedule_id) for s in existing}
+    merged = list(existing)
+    for s in new:
+        if (s.start, s.end, s.schedule_id) not in seen:
+            seen.add((s.start, s.end, s.schedule_id))
+            merged.append(s)
+    return sorted(merged, key=lambda s: (s.start, s.end))
+
+
+def _merge_incidents(
+    new: list[AcknowledgedIncident], existing: list[AcknowledgedIncident]
+) -> list[AcknowledgedIncident]:
+    """Merge two fetches, keeping the earliest acknowledgement of each incident."""
+    by_id = {inc.incident_id: inc for inc in existing}
+    for inc in new:
+        current = by_id.get(inc.incident_id)
+        if current is None or inc.acknowledged_at < current.acknowledged_at:
+            by_id[inc.incident_id] = inc
+    return list(by_id.values())
+
+
 def create_sync_plan(
     pd_client: PagerDutyClient,
     harvest_client: HarvestClient,
@@ -160,12 +210,14 @@ def create_sync_plan(
         eff_unsociable = unsociable_hours
 
     max_lookback_hours = max(eff_sociable, eff_unsociable, window_hours or 1.0)
-    fetch_since = since - timedelta(hours=max_lookback_hours)
+    max_window = timedelta(hours=max_lookback_hours)
 
-    # 1. Fetch scheduled on-call shifts for this user in the window
+    # 1-2. Fetch on-call shifts and acknowledged alerts. Whether an alert starts a new
+    # window depends on the alerts before it, so look back before `since` until there is
+    # a quiet gap of at least one window: the first alert after such a gap always starts
+    # a window, which makes the result independent of the requested range.
+    fetch_since = since - max_window
     shifts = pd_client.get_oncall_shifts(user_id=user_id, since=fetch_since, until=until)
-
-    # 2. Fetch acknowledged alerts
     all_incidents = pd_client.get_acknowledged_incidents(
         user_id=user_id,
         since=fetch_since,
@@ -174,6 +226,22 @@ def create_sync_plan(
         chunk_days=chunk_days,
         progress_callback=progress_callback,
     )
+    lookback = max_window
+    while lookback < MAX_CHAIN_LOOKBACK and not _has_quiet_gap_before(
+        all_incidents, shifts, fetch_since, since, max_window, filter_oncall_shifts
+    ):
+        lookback = min(lookback * 2, MAX_CHAIN_LOOKBACK)
+        earlier = since - lookback
+        shifts = _merge_shifts(
+            pd_client.get_oncall_shifts(user_id=user_id, since=earlier, until=fetch_since), shifts
+        )
+        all_incidents = _merge_incidents(
+            pd_client.get_acknowledged_incidents(
+                user_id=user_id, since=earlier, until=fetch_since, tz=tz, chunk_days=chunk_days
+            ),
+            all_incidents,
+        )
+        fetch_since = earlier
     all_incidents.sort(key=lambda inc: inc.event_time)
 
     # 3. Fetch existing Harvest entries for the window
@@ -316,6 +384,9 @@ def execute_sync_plan(
             )
             item.status = SyncStatus.CREATED
             item.harvest_entry_id = entry.id
+            if entry.is_running:
+                # Created, but the timer couldn't be stopped: it will keep adding time.
+                item.error_message = "Created, but the Harvest timer is still running. Stop it in Harvest."
         except Exception as e:
             item.status = SyncStatus.FAILED
             item.error_message = str(e)
