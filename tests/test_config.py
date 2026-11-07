@@ -59,3 +59,25 @@ def test_save_and_load_config(tmp_path: Path):
     assert cfg.timezone == "Europe/London"
     assert cfg.annual_salary == 52000.0
     assert cfg.get_tz() == ZoneInfo("Europe/London")
+
+
+def test_invalid_timezone_raises_instead_of_falling_back_to_utc():
+    import pytest
+
+    cfg = Config(
+        pagerduty_api_token="pd",
+        harvest_access_token="h",
+        harvest_account_id="1",
+        timezone="Europe/Londn",
+    )
+    with pytest.raises(ValueError, match="Europe/Londn"):
+        cfg.get_tz()
+
+
+def test_saved_env_is_owner_only(tmp_path: Path):
+    import os
+    import stat
+
+    path = save_config_to_env({"PAGERDUTY_API_TOKEN": "secret"}, target_path=tmp_path / ".env")
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
