@@ -233,13 +233,14 @@ def classify_overtime_task(
     task_name: str,
     project_name: Optional[str],
     rates: dict[str, float],
-) -> tuple[str, float]:
+) -> Optional[tuple[str, float]]:
     """
     Categorize a Harvest task and determine its hourly overtime rate.
     Default rates:
     - Inactive on-call: £6/hr
     - Active on-call: £30/hr
     - Out of hours configuration: £30/hr
+    Returns None for tasks that are not overtime (they are excluded from the report).
     """
     t_lower = (task_name or "").lower().strip()
     rate_inactive = rates.get("inactive", 6.0)
@@ -253,8 +254,8 @@ def classify_overtime_task(
     elif "active" in t_lower or "on call" in t_lower or "on-call" in t_lower:
         return "1st On Call - Active", rate_active
     else:
-        # Fallback for other tasks (default active rate £30)
-        return task_name, rate_active
+        # Not an on-call / out-of-hours task (e.g. normal project work): not overtime.
+        return None
 
 
 def calculate_overtime_report(
@@ -266,17 +267,28 @@ def calculate_overtime_report(
     currency_symbol: str = "£",
 ) -> OvertimeReport:
     """Fetch Harvest time entries for the period and compile an OvertimeReport."""
-    entries = harvest_client.get_time_entries(from_date=start_date, to_date=end_date)
+    # Scope to the current Harvest user: admin/manager tokens otherwise return everyone's entries.
+    harvest_user_id = harvest_client.get_current_user().id
+    entries = harvest_client.get_time_entries(
+        from_date=start_date, to_date=end_date, user_id=harvest_user_id
+    )
     # Sort entries chronologically by spent_date
     entries.sort(key=lambda e: (e.spent_date, e.id))
 
     items: list[OvertimeItem] = []
     category_buckets: dict[tuple[str, str, int, float], list[OvertimeItem]] = {}
+    excluded_hours: dict[str, float] = {}
 
     for entry in entries:
         tname = entry.task_name or f"Task {entry.task_id}"
         pname = entry.project_name or f"Project {entry.project_id}"
-        category, rate = classify_overtime_task(tname, pname, rates)
+        classified = classify_overtime_task(tname, pname, rates)
+        if classified is None:
+            # Not overtime, but report it so a misnamed on-call task isn't silently lost.
+            key = f"{pname} / {tname}"
+            excluded_hours[key] = excluded_hours.get(key, 0.0) + entry.hours
+            continue
+        category, rate = classified
 
         item = OvertimeItem(entry=entry, category=category, hourly_rate=rate)
         items.append(item)
@@ -305,12 +317,13 @@ def calculate_overtime_report(
     # Sort categories: Active first, then Out of hours, then Inactive, then by earnings
     def sort_key(s: OvertimeCategorySummary) -> tuple[int, float]:
         name_lower = s.category.lower()
-        if "active" in name_lower:
+        # Check "inactive" before "active": "active" is a substring of "inactive".
+        if "inactive" in name_lower:
+            rank = 3
+        elif "active" in name_lower:
             rank = 1
         elif "out of hours" in name_lower:
             rank = 2
-        elif "inactive" in name_lower:
-            rank = 3
         else:
             rank = 4
         return (rank, -s.total_earned)
@@ -329,4 +342,5 @@ def calculate_overtime_report(
         total_hours=total_hours,
         total_earned=total_earned,
         currency_symbol=currency_symbol,
+        excluded_hours=excluded_hours,
     )

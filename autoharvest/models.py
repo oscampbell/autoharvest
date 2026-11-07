@@ -196,6 +196,8 @@ class OvertimeReport:
     total_hours: float
     total_earned: float
     currency_symbol: str = "£"
+    # Hours per "Project / Task" that were not classified as overtime and left out.
+    excluded_hours: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

@@ -641,3 +641,93 @@ def test_sociable_vs_unsociable_windowing_and_boundary():
     assert plan.items[3].ignored_by_incident.incident_number == 603
 
     assert plan.total_pending_hours == 1.5
+
+
+def test_already_logged_requires_whole_incident_tag():
+    from autoharvest.sync import is_incident_already_logged
+
+    inc = AcknowledgedIncident(
+        incident_id="PX1", incident_number=2675, title="t", service_name="s",
+        urgency="high", html_url="u", acknowledged_at=datetime.now(timezone.utc),
+        spent_date="2026-10-15", log_entry_id="L1",
+    )
+    longer = HarvestTimeEntry(
+        id=1, spent_date="2026-10-15", hours=1.0,
+        notes="PG#267540 - Webservers - SSL cert", project_id=1, task_id=2,
+    )
+    loose = HarvestTimeEntry(
+        id=2, spent_date="2026-10-15", hours=1.0,
+        notes="Follow-up on #26750", project_id=1, task_id=2,
+    )
+    assert is_incident_already_logged(inc, [longer, loose]) is None
+
+    exact = HarvestTimeEntry(
+        id=3, spent_date="2026-10-01", hours=1.0,
+        notes="PG#2675 - Webservers - SSL cert", project_id=1, task_id=2,
+    )
+    assert is_incident_already_logged(inc, [longer, exact]) == exact
+
+
+def test_parse_end_datetime_includes_whole_day():
+    from zoneinfo import ZoneInfo
+    from autoharvest.sync import parse_end_datetime
+
+    tz = ZoneInfo("Europe/London")
+    assert parse_end_datetime("2026-10-08", tz) == datetime(2026, 10, 9, 0, 0, tzinfo=tz)
+    # Explicit times are left unchanged
+    assert parse_end_datetime("2026-10-08T12:30:00", tz) == datetime(2026, 10, 8, 12, 30, tzinfo=tz)
+
+
+def test_create_sync_plan_scopes_harvest_entries_to_current_user():
+    pd_mock = MagicMock()
+    pd_mock.get_oncall_shifts.return_value = []
+    pd_mock.get_acknowledged_incidents.return_value = []
+    harvest_mock = MagicMock()
+    harvest_mock.get_current_user.return_value.id = 42
+    harvest_mock.get_time_entries.return_value = []
+
+    create_sync_plan(
+        pd_client=pd_mock,
+        harvest_client=harvest_mock,
+        user_id="PUSER",
+        since=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        until=datetime(2026, 10, 8, tzinfo=timezone.utc),
+        project_id=1,
+        task_id=2,
+    )
+
+    harvest_mock.get_time_entries.assert_called_once_with(
+        from_date="2026-10-01", to_date="2026-10-08", user_id=42
+    )
+
+
+def test_execute_sync_plan_does_not_cross_midnight():
+    from autoharvest.models import SyncItem
+
+    harvest_mock = MagicMock()
+    harvest_mock.create_time_entry.return_value = HarvestTimeEntry(
+        id=1, spent_date="2026-10-13", hours=1.0, notes="", project_id=50, task_id=60,
+    )
+    harvest_mock.format_time_for_harvest.side_effect = lambda dt: dt.strftime("%H:%M")
+
+    inc = AcknowledgedIncident(
+        incident_id="PD9", incident_number=9, title="Late alert", service_name="Web",
+        urgency="high", html_url="https://pd/9",
+        acknowledged_at=datetime(2026, 10, 13, 23, 45, tzinfo=timezone.utc),
+        spent_date="2026-10-13", log_entry_id="L9",
+    )
+    plan = SyncPlan(
+        since=datetime(2026, 10, 13, tzinfo=timezone.utc),
+        until=datetime(2026, 10, 14, tzinfo=timezone.utc),
+        items=[SyncItem(incident=inc, hours=1.0, status=SyncStatus.PENDING_CREATION)],
+        project_id=50,
+        task_id=60,
+    )
+
+    execute_sync_plan(harvest_mock, plan)
+
+    kwargs = harvest_mock.create_time_entry.call_args.kwargs
+    assert kwargs["spent_date"] == "2026-10-13"
+    assert kwargs["hours"] == 1.0
+    assert kwargs["started_time"] == "22:59"
+    assert kwargs["ended_time"] == "23:59"
