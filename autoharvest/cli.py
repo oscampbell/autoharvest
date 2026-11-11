@@ -21,6 +21,7 @@ from autoharvest.harvest import HarvestAPIError, HarvestClient
 from autoharvest.overtime import calculate_overtime_report, resolve_overtime_period
 from autoharvest.payroll import calculate_estimated_pay
 from autoharvest.pagerduty import PagerDutyAPIError, PagerDutyClient
+from autoharvest.models import SyncStatus
 from autoharvest.sync import (
     create_sync_plan,
     execute_sync_plan,
@@ -503,12 +504,26 @@ def sync_cmd(
     # Re-display results table with created/failed statuses
     display_sync_plan_table(plan, is_dry_run=False)
 
-    failed = [item for item in results if item.error_message]
+    if harvest_client.company_config_error:
+        console.print(
+            "\n[yellow]Couldn't read your Harvest company settings, so entries were logged as plain "
+            f"durations with a 24h clock.[/yellow] [dim]({harvest_client.company_config_error})[/dim]"
+        )
+
+    still_running = [
+        item for item in results if item.status == SyncStatus.CREATED and item.error_message
+    ]
+    if still_running:
+        console.print(f"\n[bold yellow]⚠️ {len(still_running)} entry/entries left with a running timer:[/]")
+        for r in still_running:
+            console.print(f"  • Incident #{r.incident.incident_number}: {r.error_message}")
+
+    failed = [item for item in results if item.status == SyncStatus.FAILED]
     if failed:
         console.print(f"\n[bold red]⚠️ {len(failed)} entry/entries failed to create:[/]")
         for f in failed:
             console.print(f"  • Incident #{f.incident.incident_number}: {f.error_message}")
-    else:
+    elif not still_running:
         console.print("\n[bold green]✓ Successfully logged all pending alerts to Harvest![/]")
 
 

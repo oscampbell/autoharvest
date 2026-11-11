@@ -31,6 +31,8 @@ class HarvestClient:
         self.user_agent = user_agent or "autoharvest (time-tracker)"
         self.session = session or requests.Session()
         self._company_config: Optional[dict[str, Any]] = None
+        # Set when /company couldn't be read and defaults (duration mode, 24h clock) are in use.
+        self.company_config_error: Optional[str] = None
         self.session.headers.update({
             "Authorization": f"Bearer {self.access_token}",
             "Harvest-Account-Id": self.account_id,
@@ -98,8 +100,10 @@ class HarvestClient:
         if self._company_config is None:
             try:
                 self._company_config = self.get_company()
-            except Exception:
+            except Exception as e:
+                # Fall back to defaults, but record why so the CLI can warn about it.
                 self._company_config = {}
+                self.company_config_error = str(e)
         return self._company_config
 
     @property
@@ -256,6 +260,7 @@ class HarvestClient:
             try:
                 data = self.stop_time_entry(entry_id)
             except Exception:
+                # Leave is_running=True on the returned entry so the caller can warn about it.
                 pass
 
         ext_ref = data.get("external_reference") or {}
