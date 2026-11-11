@@ -94,6 +94,16 @@ def test_cli_overtime(mock_harvest_cls, tmp_path: Path):
             task_id=20,
             task_name="1st On Call - Inactive",
         ),
+        HarvestTimeEntry(
+            id=103,
+            spent_date="2026-10-17",
+            hours=3.0,
+            notes="",
+            project_id=3,
+            project_name="Client X",
+            task_id=30,
+            task_name="Development",
+        ),
     ]
     mock_harvest_cls.return_value = mock_harvest
 
@@ -109,6 +119,8 @@ def test_cli_overtime(mock_harvest_cls, tmp_path: Path):
     assert "1st On Call - Inactive" in result.output
     assert "17.00 hrs" in result.output
     assert "£150.00" in result.output
+    assert "Not counted as overtime" in result.output
+    assert "Client X / Development: 3.00h" in result.output
 
     # Test default overtime (next coming payday)
     result_default = runner.invoke(cli, ["--config", str(env_file), "overtime"])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
@@ -30,6 +31,19 @@ def parse_datetime(dt_str: str, tz: ZoneInfo) -> datetime:
     return dt
 
 
+def parse_end_datetime(dt_str: str, tz: ZoneInfo) -> datetime:
+    """
+    Parse an end-of-range value. A date-only value (YYYY-MM-DD) means the whole
+    of that day is included, so it resolves to midnight at the start of the next day.
+    """
+    s = dt_str.strip()
+    dt = parse_datetime(s, tz)
+    if len(s) == 10 and s.count("-") == 2:
+        next_day = dt.date() + timedelta(days=1)
+        return datetime(next_day.year, next_day.month, next_day.day, tzinfo=tz)
+    return dt
+
+
 def is_incident_already_logged(incident: AcknowledgedIncident, harvest_entries: list[HarvestTimeEntry]) -> Optional[HarvestTimeEntry]:
     """
     Check if a PagerDuty incident has already been logged in Harvest.
@@ -39,18 +53,20 @@ def is_incident_already_logged(incident: AcknowledgedIncident, harvest_entries: 
     3. notes contain [PD-{incident_id}]
     4. notes contain #{incident_number} and match spent_date
     """
-    pg_tag = f"PG#{incident.incident_number}"
+    inc_num = re.escape(str(incident.incident_number).strip())
+    # Whole-tag matches only: "PG#2675" must not match "PG#267540".
+    pg_tag = re.compile(rf"PG#{inc_num}(?!\d)")
     pd_tag = f"[PD-{incident.incident_id}]"
-    inc_num_tag = f"#{incident.incident_number}"
+    inc_num_tag = re.compile(rf"(?<!\d)#{inc_num}(?!\d)")
 
     for entry in harvest_entries:
         if entry.external_reference_id and entry.external_reference_id == incident.incident_id:
             return entry
-        if pg_tag in entry.notes:
+        if pg_tag.search(entry.notes):
             return entry
         if pd_tag in entry.notes:
             return entry
-        if inc_num_tag in entry.notes and entry.spent_date == incident.spent_date:
+        if inc_num_tag.search(entry.notes) and entry.spent_date == incident.spent_date:
             return entry
 
     return None
@@ -179,7 +195,11 @@ def create_sync_plan(
     # 3. Fetch existing Harvest entries for the window
     from_date = since.astimezone(tz).strftime("%Y-%m-%d")
     to_date = until.astimezone(tz).strftime("%Y-%m-%d")
-    existing_entries = harvest_client.get_time_entries(from_date=from_date, to_date=to_date)
+    # Scope to the current Harvest user: admin/manager tokens otherwise return everyone's entries.
+    harvest_user_id = harvest_client.get_current_user().id
+    existing_entries = harvest_client.get_time_entries(
+        from_date=from_date, to_date=to_date, user_id=harvest_user_id
+    )
 
     # 4. Apply on-call shift filtering and windowing
     items: list[SyncItem] = []
