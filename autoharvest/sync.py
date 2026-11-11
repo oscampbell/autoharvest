@@ -77,6 +77,20 @@ def is_sociable_hours(dt: datetime, tz: ZoneInfo) -> bool:
         return local_time >= time(17, 30)
 
 
+def clock_slot_start(dt: datetime, hours: float, tz: ZoneInfo) -> datetime:
+    """
+    Start of the clock-aligned slot that `dt` falls in, counting slots of `hours` from local
+    midnight. With 1h slots 04:37 -> 04:00; with 0.5h slots 17:42 -> 17:30.
+    """
+    local = dt.astimezone(tz)
+    slot_minutes = max(1, round(hours * 60))
+    minutes = local.hour * 60 + local.minute
+    start_minutes = minutes - minutes % slot_minutes
+    return local.replace(
+        hour=start_minutes // 60, minute=start_minutes % 60, second=0, microsecond=0
+    )
+
+
 def is_alert_during_shift(
     alert: AcknowledgedIncident,
     shifts: list[PagerDutyShift],
@@ -141,6 +155,7 @@ def create_sync_plan(
     chunk_days: float = 1.0,
     filter_oncall_shifts: bool = True,
     include_non_oncall: bool = False,
+    align_to_clock: bool = False,
     progress_callback: Optional[Callable[[datetime, datetime, int], None]] = None,
 ) -> SyncPlan:
     """
@@ -151,6 +166,9 @@ def create_sync_plan(
     - Unsociable hours (all other times, e.g. overnight 00:00-08:30 weekends, 00:00-17:30 weekdays) create 1.0 hour.
     - Any alerts that happen within that active window (0.5h or 1.0h) are ignored.
     - The next bookable hour/half-hour starts with the next alert after the end of the previous window.
+
+    With `align_to_clock`, each alert is booked as the clock-aligned hour/half-hour it falls in
+    instead (e.g. 04:37 -> 04:00-05:00), and further alerts inside that slot are ignored.
     """
     if hours_per_alert is not None:
         eff_sociable = hours_per_alert
@@ -224,7 +242,16 @@ def create_sync_plan(
 
         if current_window_end is None or alert_time >= current_window_end:
             # Starts a new bookable window!
-            current_window_end = alert_time + timedelta(hours=win_dur)
+            booked_start: Optional[datetime] = None
+            if align_to_clock:
+                booked_start = clock_slot_start(alert_time, expected_hours, tz)
+                if current_window_end is not None and booked_start < current_window_end:
+                    # Never overlap the previous booking (only possible with unusual slot sizes).
+                    booked_start = current_window_end
+                win_dur = expected_hours
+                current_window_end = booked_start + timedelta(hours=win_dur)
+            else:
+                current_window_end = alert_time + timedelta(hours=win_dur)
             window_source = inc
             current_window_duration = win_dur
 
@@ -240,6 +267,7 @@ def create_sync_plan(
                             shift=matching_shift,
                             is_sociable=is_soc,
                             window_hours=current_window_duration,
+                            booked_start=booked_start,
                         )
                     )
                 else:
@@ -251,6 +279,7 @@ def create_sync_plan(
                             shift=matching_shift,
                             is_sociable=is_soc,
                             window_hours=current_window_duration,
+                            booked_start=booked_start,
                         )
                     )
         else:
@@ -297,7 +326,7 @@ def execute_sync_plan(
         }
 
         # Calculate start and end times in user's target timezone
-        start_dt = item.incident.event_time.astimezone(effective_tz)
+        start_dt = (item.booked_start or item.incident.event_time).astimezone(effective_tz)
         end_dt = start_dt + timedelta(hours=item.hours)
         started_time_str = harvest_client.format_time_for_harvest(start_dt)
         ended_time_str = harvest_client.format_time_for_harvest(end_dt)

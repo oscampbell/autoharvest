@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
@@ -116,6 +117,11 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
     for item in plan.items:
         inc = item.incident
         alert_time_str = inc.event_time.strftime("%Y-%m-%d %H:%M")
+        if item.booked_start is not None and item.status in (
+            SyncStatus.PENDING_CREATION, SyncStatus.CREATED, SyncStatus.FAILED
+        ):
+            booked_end = item.booked_start + timedelta(hours=item.hours)
+            alert_time_str += f"\n[dim]→ {item.booked_start.strftime('%H:%M')}–{booked_end.strftime('%H:%M')}[/]"
         inc_ref = f"PG#{inc.incident_number}"
 
         if item.status == SyncStatus.ALREADY_LOGGED:

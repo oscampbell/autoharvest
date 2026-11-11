@@ -104,6 +104,9 @@ class SyncItem:
     error_message: Optional[str] = None
     is_sociable: bool = False
     window_hours: float = 1.0
+    # Clock-aligned mode: where the booked segment starts (e.g. 04:00 for an alert at 04:37).
+    # None means the segment starts at the alert time.
+    booked_start: Optional[datetime] = None
 
     @property
     def formatted_note(self) -> str:
