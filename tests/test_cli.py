@@ -143,3 +143,49 @@ def test_cli_overtime(mock_harvest_cls, tmp_path: Path):
     assert result_pay_env.exit_code == 0
     assert "ESTIMATED TAKE-HOME" in result_pay_env.output
     assert "Annual Base Salary: £54,000.00" in result_pay_env.output
+
+
+def test_cli_invalid_timezone_shows_clear_error(tmp_path):
+    env = tmp_path / "custom.env"
+    env.write_text("HARVEST_ACCESS_TOKEN=h\nHARVEST_ACCOUNT_ID=1\nTIMEZONE=Europe/Londn\n")
+    result = CliRunner().invoke(cli, ["--config", str(env), "overtime"])
+    assert result.exit_code != 0
+    assert "Unknown TIMEZONE" in result.output
+
+
+@patch("autoharvest.cli.PagerDutyClient")
+@patch("autoharvest.cli.HarvestClient")
+def test_cli_setup_writes_to_config_path(mock_harvest_cls, mock_pd_cls, tmp_path, monkeypatch):
+    mock_pd = MagicMock()
+    mock_pd.get_current_user.return_value = PagerDutyUser(
+        id="P1", name="Test User", email="t@test.com", time_zone="UTC"
+    )
+    mock_pd_cls.return_value = mock_pd
+    mock_harvest = MagicMock()
+    mock_harvest.get_current_user.return_value = HarvestUser(
+        id=7, first_name="Test", last_name="User", email="t@test.com"
+    )
+    mock_harvest.get_project_assignments.return_value = [
+        HarvestProject(id=100, name="On Call", tasks=[HarvestTask(id=200, name="Active On-Call")])
+    ]
+    mock_harvest_cls.return_value = mock_harvest
+
+    custom_env = tmp_path / "custom.env"
+    custom_env.write_text("TIMEZONE=UTC\n")
+    monkeypatch.chdir(tmp_path)
+
+    # Accept every prompt's default; tokens are typed in.
+    answers = iter(["pd_tok", "h_tok", "12345"])
+    def fake_prompt_ask(*args, **kwargs):
+        if kwargs.get("password") or "Account ID" in str(args[0] if args else ""):
+            return next(answers)
+        return str(kwargs.get("default", ""))
+    monkeypatch.setattr("autoharvest.cli.Prompt.ask", fake_prompt_ask)
+    monkeypatch.setattr("autoharvest.cli.FloatPrompt.ask", lambda *a, **k: k.get("default", 1.0))
+    monkeypatch.setattr("autoharvest.cli.Confirm.ask", lambda *a, **k: k.get("default", False))
+
+    result = CliRunner().invoke(cli, ["--config", str(custom_env), "setup"])
+
+    assert result.exit_code == 0, result.output
+    assert "PAGERDUTY_API_TOKEN=pd_tok" in custom_env.read_text()
+    assert not (tmp_path / ".env").exists()

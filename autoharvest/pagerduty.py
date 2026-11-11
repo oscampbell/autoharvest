@@ -17,6 +17,13 @@ class PagerDutyAPIError(Exception):
         self.response_text = response_text
 
 
+# The live API returns HTTP 400 ("Offset must be less than 10001") for offsets above 10,000.
+# PagerDuty's docs state a stricter rule (offset + limit <= 10,000), which is the one followed here.
+PAGERDUTY_MAX_OFFSET = 10000
+# Smallest window the log entry fetch will split down to before giving up.
+MIN_SPLIT_WINDOW = timedelta(minutes=1)
+
+
 class PagerDutyClient:
     def __init__(self, token: str, base_url: str = "https://api.pagerduty.com", session: Optional[requests.Session] = None):
         self.token = token.strip()
@@ -141,6 +148,45 @@ class PagerDutyClient:
 
         return unique_shifts
 
+    def _iter_log_entry_pages(self, since: datetime, until: datetime):
+        """
+        Yield pages of account-wide log entries between `since` and `until`.
+
+        Pages stay within offset + limit <= 10,000, the documented limit. If a window
+        holds more than that, it is split in half and each half fetched instead.
+        A window is only yielded once fully fetched, so a split never yields
+        duplicate pages.
+        """
+        limit = 100
+        pages: list[list[dict[str, Any]]] = []
+        offset = 0
+        while True:
+            if offset + limit > PAGERDUTY_MAX_OFFSET:
+                if until - since <= MIN_SPLIT_WINDOW:
+                    raise PagerDutyAPIError(
+                        f"More than {PAGERDUTY_MAX_OFFSET} PagerDuty log entries between "
+                        f"{since.isoformat()} and {until.isoformat()}; results would be incomplete."
+                    )
+                mid = since + (until - since) / 2
+                yield from self._iter_log_entry_pages(since, mid)
+                yield from self._iter_log_entry_pages(mid, until)
+                return
+            params = {
+                "since": since.isoformat(),
+                "until": until.isoformat(),
+                "is_overview": "true",
+                "include[]": "incidents",
+                "limit": limit,
+                "offset": offset,
+            }
+            data = self._request("GET", "/log_entries", params=params)
+            entries = data.get("log_entries", [])
+            pages.append(entries)
+            if not data.get("more", False) or len(entries) < limit:
+                break
+            offset += limit
+        yield from pages
+
     def get_acknowledged_incidents(
         self,
         user_id: str,
@@ -152,11 +198,13 @@ class PagerDutyClient:
     ) -> list[AcknowledgedIncident]:
         """
         Fetch all incidents acknowledged by the user between `since` and `until`.
-        Chunks requests by `chunk_days` (default: 1 day) to avoid PagerDuty's
-        hard 10,000 offset limit (Offset must be less than 10001).
+        PagerDuty has no per-user log entry endpoint, so this pages through the
+        account-wide /log_entries and keeps only acknowledgements by this user.
+        Requests are chunked by `chunk_days` (default: 1 day); a chunk that holds
+        more than the 10,000 records that fit within PagerDuty's pagination limit is split in half
+        automatically, so results are never silently truncated.
         Deduplicates if the same incident was acknowledged multiple times.
         """
-        limit = 100
         chunk_delta = timedelta(days=chunk_days)
         incidents_by_id: dict[str, AcknowledgedIncident] = {}
 
@@ -167,24 +215,7 @@ class PagerDutyClient:
             if progress_callback:
                 progress_callback(current_start, current_end, len(incidents_by_id))
 
-            offset = 0
-            more = True
-
-            while more and offset < 10000:
-                params = {
-                    "since": current_start.isoformat(),
-                    "until": current_end.isoformat(),
-                    "is_overview": "true",
-                    "include[]": "incidents",
-                    "limit": limit,
-                    "offset": offset,
-                }
-
-                data = self._request("GET", "/log_entries", params=params)
-                entries = data.get("log_entries", [])
-                more = data.get("more", False)
-                offset += limit
-
+            for entries in self._iter_log_entry_pages(current_start, current_end):
                 for entry in entries:
                     if entry.get("type") != "acknowledge_log_entry":
                         continue
@@ -235,9 +266,6 @@ class PagerDutyClient:
                         log_entry_id=entry.get("id", ""),
                         incident_created_at=inc_created_dt,
                     )
-
-                if len(entries) < limit:
-                    break
 
             current_start = current_end
 
