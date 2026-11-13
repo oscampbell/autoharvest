@@ -146,6 +146,8 @@ autoharvest sync --shift --hours-per-alert 0.5 --apply
 - `--sociable-hours <FLOAT>`: Override hours per alert for sociable hours (default: 0.5).
 - `--unsociable-hours <FLOAT>`: Override hours per alert for unsociable hours (default: 1.0).
 - `--hours-per-alert <FLOAT>`: Flat override for all alerts (bypasses sociable/unsociable rates).
+- `--allow-overlap`: Log every slot as its own entry even when that time is already logged on the same task. By default, an alert that falls in time you've already logged (for example a ticket entered by hand) is added as a new line in that entry's notes instead, and only the uncovered part of a slot gets a new entry.
+- `--align-to-clock` / `--from-alert-time`: Book each alert as the clock hour/half-hour it falls in (an alert at 04:37 is logged as 04:00–05:00, and other alerts in that hour are ignored), or start at the alert time (the default). Set `ALIGN_TO_CLOCK=true` in `.env` (setup asks about this, or run `autoharvest config set align-to-clock true`) to make clock-aligned the default.
 - `--project-id <INT>`: Override Harvest Project ID.
 - `--task-id <INT>`: Override Harvest Task ID.
 - `-y`, `--apply`: Automatically submit pending entries without interactive prompt.
@@ -205,6 +207,18 @@ To configure your annual gross salary permanently, run `autoharvest setup` (Step
 
 ---
 
+## Changing a Setting
+
+`autoharvest config set <setting> <value>` changes one setting in your `.env` without re-running setup, and prints the old and new value. It honours `--config`.
+
+```bash
+autoharvest config set align-to-clock true
+autoharvest config set timezone Europe/London
+autoharvest config show   # API tokens are hidden
+```
+
+Settings: `align-to-clock`, `sociable-hours`, `unsociable-hours`, `project-id`, `task-id`, `timezone`. Values are checked before anything is written. API tokens can only be changed through `autoharvest setup`, which hides them as you type, so they never end up in your shell history.
+
 ## How It Works
 
 1. **PagerDuty On-Call Schedule Verification**: Queries `GET /oncalls` to retrieve all scheduled on-call shifts for you during the requested timeframe. Any alerts you acknowledged during normal working hours or weeks off are automatically ignored.
@@ -213,8 +227,13 @@ To configure your annual gross salary permanently, run `autoharvest setup` (Step
    - **Sociable Hours**: Weekends (08:30 to 00:00) & Weekdays (17:30 to 00:00). Initiates a **0.5-hour bookable window** (0.50 hours). Alerts within the 30-minute window are ignored.
    - **Unsociable Hours**: All other times / overnight. Initiates a **1.0-hour bookable window** (1.00 hour). Alerts within the 60-minute window are ignored.
    - The next bookable time starts with the next alert that occurs after the active window expires.
+   - With `--align-to-clock`, the window is instead the clock-aligned hour (unsociable) or half-hour (sociable) the alert falls in: an alert at 04:37 books 04:00–05:00, and one at 19:44 on a weekend books 19:30–20:00.
 4. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident matches via `external_reference.id` and note prefix (`PG#<IncidentNo.>`).
-5. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
+5. **Time Already Logged**: Before booking a slot, compares it with your existing entries on the same project and task (other tasks, such as inactive on-call, are ignored).
+   - **Fully covered** (e.g. a ticket logged 01:00–02:30 and an alert slot of 01:00–02:00): no new entry. The alert's `PG#…` line is added as a new line in that entry's notes, so it counts as logged on later runs. The entry's time and hours are not changed.
+   - **Partly covered** (slot 02:00–03:00, ticket ending 02:30): the alert line is added to the entry covering the alert time, and a new entry is logged for the uncovered part only (02:30–03:00).
+   - Entries without start and end times (duration-only accounts) can't be compared and are ignored. Use `--allow-overlap` to turn this off.
+6. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
    - `spent_date`: Date the alert occurred (in your local timezone)
    - `hours`: 0.5 or 1.0 hours (based on sociable vs unsociable hours)
    - `notes`: `PG#<IncidentNo.> - <Impacted Service> - <Summary>` (e.g. `PG#267540 - Webservers - SSL Certificate for www.sohonet.com due to expire soon`)

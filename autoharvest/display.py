@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
@@ -116,6 +117,11 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
     for item in plan.items:
         inc = item.incident
         alert_time_str = inc.event_time.strftime("%Y-%m-%d %H:%M")
+        if item.booked_start is not None and item.status in (
+            SyncStatus.PENDING_CREATION, SyncStatus.CREATED, SyncStatus.FAILED
+        ):
+            booked_end = item.booked_start + timedelta(hours=item.hours)
+            alert_time_str += f"\n[dim]→ {item.booked_start.strftime('%H:%M')}–{booked_end.strftime('%H:%M')}[/]"
         inc_ref = f"PG#{inc.incident_number}"
 
         if item.status == SyncStatus.ALREADY_LOGGED:
@@ -129,6 +135,12 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
             hours_str = "[dim]0.00h[/]"
         elif item.status == SyncStatus.IGNORED_NOT_ONCALL:
             status_badge = "[dim]🚫 Not On-Call (Outside shift)[/]"
+            hours_str = "[dim]0.00h[/]"
+        elif item.status == SyncStatus.COVERED_BY_EXISTING:
+            status_badge = f"[bold yellow]↪ Add to entry {item.append_to_entry_id}[/]"
+            hours_str = "[dim]0.00h[/]"
+        elif item.status == SyncStatus.ADDED_TO_EXISTING:
+            status_badge = f"[bold green]✓ Added to entry {item.append_to_entry_id}[/]"
             hours_str = "[dim]0.00h[/]"
         elif item.status == SyncStatus.PENDING_CREATION:
             if is_dry_run:
@@ -182,6 +194,16 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
             f"      ├─ [green]Sociable Hours ({plan.sociable_hours:.2f}h):[/] {len(sociable_pending)} alert(s) ({sum(i.hours for i in sociable_pending):.2f} hrs)",
             f"      └─ [green]Unsociable Hours ({plan.unsociable_hours:.2f}h):[/] {len(unsociable_pending)} alert(s) ({sum(i.hours for i in unsociable_pending):.2f} hrs)",
         ])
+    covered = [i for i in plan.items if i.status in (SyncStatus.COVERED_BY_EXISTING, SyncStatus.ADDED_TO_EXISTING)]
+    if covered:
+        summary_lines.append(
+            f"• [bold yellow]Alerts in time already logged:[/] {len(covered)} alert(s), added as a note line to that entry (0.00 hours)"
+        )
+    trimmed = [i for i in plan.items if i.trimmed and i.status in (SyncStatus.PENDING_CREATION, SyncStatus.CREATED)]
+    if trimmed:
+        summary_lines.append(
+            f"• [bold yellow]Shortened to the uncovered part:[/] {len(trimmed)} alert(s)"
+        )
     summary_lines.append(
         f"• [dim]Ignored Alerts (Within active alert window):[/] {ignored_count} alert(s) (0.00 hours)"
     )

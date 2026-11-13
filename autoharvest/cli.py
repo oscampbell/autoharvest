@@ -20,6 +20,7 @@ from autoharvest.display import (
 from autoharvest.harvest import HarvestAPIError, HarvestClient
 from autoharvest.overtime import calculate_overtime_report, resolve_overtime_period
 from autoharvest.payroll import calculate_estimated_pay
+from autoharvest.config_cmd import config_group
 from autoharvest.pagerduty import PagerDutyAPIError, PagerDutyClient
 from autoharvest.sync import (
     create_sync_plan,
@@ -298,8 +299,16 @@ def setup_cmd(ctx: click.Context) -> None:
         except ValueError:
             console.print("[yellow]Invalid salary entered, skipping.[/yellow]")
 
+    # 7. Booking style
+    align_to_clock = Confirm.ask(
+        "\nBook each alert as the [bold]clock hour/half-hour[/] it falls in? "
+        "[dim](e.g. an alert at 04:37 is logged as 04:00-05:00; No = start at the alert time)[/dim]",
+        default=cfg.align_to_clock,
+    )
+
     # Save to .env
     env_updates = {
+        "ALIGN_TO_CLOCK": "true" if align_to_clock else "false",
         "PAGERDUTY_API_TOKEN": pd_token,
         "PAGERDUTY_USER_ID": pd_user_id or "",
         "HARVEST_ACCESS_TOKEN": harvest_token,
@@ -333,6 +342,20 @@ def setup_cmd(ctx: click.Context) -> None:
 @click.option("--apply", "-y", "apply_changes", is_flag=True, default=False, help="Submit changes to Harvest directly.")
 @click.option("--dry-run", is_flag=True, default=False, help="Preview without making any changes.")
 @click.option("--all-alerts", is_flag=True, default=False, help="Process all acknowledged alerts without filtering to scheduled on-call shifts.")
+@click.option(
+    "--align-to-clock/--from-alert-time",
+    "align_to_clock",
+    default=None,
+    help="Book each alert as the clock hour/half-hour it falls in (04:37 -> 04:00-05:00) "
+    "instead of starting at the alert time. Default: ALIGN_TO_CLOCK in .env, else off.",
+)
+@click.option(
+    "--allow-overlap",
+    is_flag=True,
+    default=False,
+    help="Log every slot as a new entry even if time is already logged on the same task "
+    "(by default covered alerts are added as a line to the existing entry instead).",
+)
 @click.option("--show-non-oncall", is_flag=True, default=False, help="Include alerts that occurred outside on-call shifts in the preview table.")
 @click.pass_context
 def sync_cmd(
@@ -349,6 +372,8 @@ def sync_cmd(
     apply_changes: bool,
     dry_run: bool,
     all_alerts: bool,
+    align_to_clock: Optional[bool],
+    allow_overlap: bool,
     show_non_oncall: bool,
 ) -> None:
     """Sync acknowledged PagerDuty alerts to Harvest time tracking."""
@@ -444,6 +469,8 @@ def sync_cmd(
                 tz=tz,
                 filter_oncall_shifts=not all_alerts,
                 include_non_oncall=show_non_oncall,
+                align_to_clock=cfg.align_to_clock if align_to_clock is None else align_to_clock,
+                skip_covered=not allow_overlap,
                 progress_callback=update_progress,
             )
         except Exception as e:
@@ -475,7 +502,7 @@ def sync_cmd(
     is_dry_run = dry_run or (not apply_changes)
     display_sync_plan_table(plan, is_dry_run=is_dry_run)
 
-    if not plan.pending_items:
+    if not plan.actionable_items:
         console.print("\n[bold green]✓ All acknowledged alerts for this period are already logged in Harvest![/]")
         return
 
@@ -488,10 +515,13 @@ def sync_cmd(
     # If --apply was not provided, prompt user interactively
     if not apply_changes:
         console.print("")
-        should_apply = Confirm.ask(
+        question = (
             f"Log [bold green]{plan.total_pending_hours:.2f} hours[/] "
-            f"for [bold green]{len(plan.pending_items)} alert(s)[/] into Harvest now?"
+            f"for [bold green]{len(plan.pending_items)} alert(s)[/]"
         )
+        if plan.covered_items:
+            question += f" and add [bold green]{len(plan.covered_items)} alert(s)[/] to existing entries"
+        should_apply = Confirm.ask(question + " in Harvest now?")
         if not should_apply:
             console.print("[dim]Aborted. No changes made.[/dim]")
             return
@@ -649,6 +679,9 @@ def overtime_cmd(
 
 def main() -> None:
     cli(obj={})
+
+
+cli.add_command(config_group)
 
 
 if __name__ == "__main__":

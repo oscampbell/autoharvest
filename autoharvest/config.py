@@ -28,6 +28,8 @@ class Config:
     rate_out_of_hours: float = 30.0
     currency_symbol: str = "£"
     annual_salary: Optional[float] = None
+    # Book each alert as the clock-aligned hour/half-hour it falls in (e.g. 04:37 -> 04:00-05:00).
+    align_to_clock: bool = False
 
     def get_tz(self) -> ZoneInfo:
         try:
@@ -145,6 +147,7 @@ def load_config(env_path: Optional[str | Path] = None) -> Config:
         rate_out_of_hours=rate_out_of_hours,
         currency_symbol=currency_symbol,
         annual_salary=annual_salary,
+        align_to_clock=os.getenv("ALIGN_TO_CLOCK", "").strip().lower() in ("1", "true", "yes", "on"),
     )
 
 

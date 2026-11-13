@@ -122,6 +122,15 @@ class HarvestClient:
             am_pm = dt.strftime("%p").lower()
             return f"{hour}:{minute}{am_pm}"
 
+    def append_note_line(self, entry_id: int, line: str) -> dict[str, Any]:
+        """Add `line` as a new line at the end of an existing entry's notes (unless already there)."""
+        current = self._request("GET", f"/time_entries/{entry_id}")
+        notes = (current.get("notes") or "").rstrip()
+        if line in notes:
+            return current
+        new_notes = f"{notes}\n{line}" if notes else line
+        return self._request("PATCH", f"/time_entries/{entry_id}", json_data={"notes": new_notes})
+
     def stop_time_entry(self, entry_id: int) -> dict[str, Any]:
         """Stop an active/running timer."""
         return self._request("PATCH", f"/time_entries/{entry_id}/stop")

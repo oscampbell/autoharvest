@@ -11,6 +11,11 @@ class SyncStatus(str, Enum):
     ALREADY_LOGGED = "already_logged"
     IGNORED_WINDOW = "ignored_window"
     IGNORED_NOT_ONCALL = "not_oncall"
+    # The slot is fully covered by an existing entry on the same project/task, so the alert
+    # will be added as a new line in that entry's notes instead of getting its own entry.
+    COVERED_BY_EXISTING = "covered"
+    # After execution: the alert line was added to the covering entry.
+    ADDED_TO_EXISTING = "added_to_existing"
     CREATED = "created"
     FAILED = "failed"
 
@@ -104,6 +109,13 @@ class SyncItem:
     error_message: Optional[str] = None
     is_sociable: bool = False
     window_hours: float = 1.0
+    # Clock-aligned mode: where the booked segment starts (e.g. 04:00 for an alert at 04:37).
+    # None means the segment starts at the alert time.
+    booked_start: Optional[datetime] = None
+    # Existing entry that covers the alert time: the alert is added as a line in its notes.
+    append_to_entry_id: Optional[int] = None
+    # True when only part of the slot was free, so the new entry was shortened to that part.
+    trimmed: bool = False
 
     @property
     def formatted_note(self) -> str:
@@ -139,6 +151,15 @@ class SyncPlan:
         return [item for item in self.items if item.status == SyncStatus.ALREADY_LOGGED]
 
     @property
+    def covered_items(self) -> list[SyncItem]:
+        return [item for item in self.items if item.status == SyncStatus.COVERED_BY_EXISTING]
+
+    @property
+    def actionable_items(self) -> list[SyncItem]:
+        """Items that change Harvest when applied: new entries and alert lines for existing ones."""
+        return self.pending_items + self.covered_items
+
+    @property
     def ignored_items(self) -> list[SyncItem]:
         return [item for item in self.items if item.status == SyncStatus.IGNORED_WINDOW]
 
@@ -160,7 +181,16 @@ class SyncPlan:
 
     @property
     def total_logged_hours(self) -> float:
-        return sum(item.hours for item in self.already_logged_items)
+        """Hours already in Harvest, counting each entry once even if several alerts point at it."""
+        seen: set[int] = set()
+        total = 0.0
+        for item in self.already_logged_items:
+            if item.harvest_entry_id is not None:
+                if item.harvest_entry_id in seen:
+                    continue
+                seen.add(item.harvest_entry_id)
+            total += item.hours
+        return total
 
 
 @dataclass

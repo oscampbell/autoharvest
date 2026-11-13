@@ -77,6 +77,105 @@ def is_sociable_hours(dt: datetime, tz: ZoneInfo) -> bool:
         return local_time >= time(17, 30)
 
 
+def clock_slot_start(dt: datetime, hours: float, tz: ZoneInfo) -> datetime:
+    """
+    Start of the clock-aligned slot that `dt` falls in, counting slots of `hours` from local
+    midnight. With 1h slots 04:37 -> 04:00; with 0.5h slots 17:42 -> 17:30.
+    """
+    local = dt.astimezone(tz)
+    slot_minutes = max(1, round(hours * 60))
+    minutes = local.hour * 60 + local.minute
+    start_minutes = minutes - minutes % slot_minutes
+    return local.replace(
+        hour=start_minutes // 60, minute=start_minutes % 60, second=0, microsecond=0
+    )
+
+
+def parse_harvest_clock(value: str) -> Optional[time]:
+    """Parse a Harvest start/end time in either clock format: '13:30', '1:30pm', '12:05am'."""
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    suffix = v[-2:] if v[-2:] in ("am", "pm") else None
+    if suffix:
+        v = v[:-2].strip()
+    try:
+        hour_str, minute_str = v.split(":")
+        hour, minute = int(hour_str), int(minute_str)
+    except ValueError:
+        return None
+    if suffix == "am" and hour == 12:
+        hour = 0
+    elif suffix == "pm" and hour != 12:
+        hour += 12
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return time(hour, minute)
+
+
+def busy_intervals(
+    entries: list[HarvestTimeEntry], project_id: int, task_id: int, tz: ZoneInfo
+) -> list[tuple[datetime, datetime, int]]:
+    """
+    Start/end of existing entries on the same project and task, as (start, end, entry_id).
+    Entries without start/end times (duration-only accounts, running timers) are skipped.
+    An end time earlier than the start means the entry runs past midnight.
+    """
+    intervals = []
+    for e in entries:
+        if e.project_id != project_id or e.task_id != task_id:
+            continue
+        start_t, end_t = parse_harvest_clock(e.started_time or ""), parse_harvest_clock(e.ended_time or "")
+        if start_t is None or end_t is None:
+            continue
+        day = datetime.strptime(e.spent_date, "%Y-%m-%d").date()
+        start = datetime.combine(day, start_t, tzinfo=tz)
+        end = datetime.combine(day, end_t, tzinfo=tz)
+        if end <= start:
+            end += timedelta(days=1)
+        intervals.append((start, end, e.id))
+    return sorted(intervals)
+
+
+def entry_covering(moment: datetime, busy: list[tuple[datetime, datetime, int]]) -> Optional[int]:
+    """Id of the existing entry whose time range contains `moment`, if any."""
+    for b_start, b_end, entry_id in busy:
+        if b_start <= moment < b_end:
+            return entry_id
+    return None
+
+
+def free_part_of_slot(
+    start: datetime, end: datetime, busy: list[tuple[datetime, datetime, int]]
+) -> tuple[Optional[tuple[datetime, datetime]], Optional[int]]:
+    """
+    The part of [start, end) not covered by any busy interval, and the id of an entry that
+    overlapped it. Returns (None, id) if the slot is fully covered. If the free time is split
+    into several pieces, the longest piece is returned (the rest is too short to matter in
+    practice, and booking it would need several entries for one alert).
+    """
+    free = [(start, end)]
+    overlapped_by: Optional[int] = None
+    for b_start, b_end, entry_id in busy:
+        next_free = []
+        for f_start, f_end in free:
+            if b_end <= f_start or b_start >= f_end:
+                next_free.append((f_start, f_end))
+                continue
+            overlapped_by = overlapped_by or entry_id
+            if f_start < b_start:
+                next_free.append((f_start, b_start))
+            if b_end < f_end:
+                next_free.append((b_end, f_end))
+        free = next_free
+    free = [(s, e) for s, e in free if e - s >= timedelta(minutes=1)]
+    if overlapped_by is None:
+        return (start, end), None
+    if not free:
+        return None, overlapped_by
+    return max(free, key=lambda p: p[1] - p[0]), overlapped_by
+
+
 def is_alert_during_shift(
     alert: AcknowledgedIncident,
     shifts: list[PagerDutyShift],
@@ -141,6 +240,8 @@ def create_sync_plan(
     chunk_days: float = 1.0,
     filter_oncall_shifts: bool = True,
     include_non_oncall: bool = False,
+    align_to_clock: bool = False,
+    skip_covered: bool = True,
     progress_callback: Optional[Callable[[datetime, datetime, int], None]] = None,
 ) -> SyncPlan:
     """
@@ -151,6 +252,13 @@ def create_sync_plan(
     - Unsociable hours (all other times, e.g. overnight 00:00-08:30 weekends, 00:00-17:30 weekdays) create 1.0 hour.
     - Any alerts that happen within that active window (0.5h or 1.0h) are ignored.
     - The next bookable hour/half-hour starts with the next alert after the end of the previous window.
+
+    With `align_to_clock`, each alert is booked as the clock-aligned hour/half-hour it falls in
+    instead (e.g. 04:37 -> 04:00-05:00), and further alerts inside that slot are ignored.
+
+    With `skip_covered` (the default), a slot that is already covered by an existing entry on
+    the same project and task (for example a ticket logged by hand) is not booked again, and a
+    partly covered slot is shortened to the uncovered part. Existing entries are never changed.
     """
     if hours_per_alert is not None:
         eff_sociable = hours_per_alert
@@ -187,6 +295,8 @@ def create_sync_plan(
     window_source: Optional[AcknowledgedIncident] = None
     current_window_duration: float = 1.0
     non_oncall_count = 0
+    # Time already logged on this project/task, so covered slots aren't booked twice.
+    busy = busy_intervals(existing_entries, project_id, task_id, tz) if skip_covered else []
 
     for inc in all_incidents:
         alert_time = inc.event_time
@@ -224,7 +334,16 @@ def create_sync_plan(
 
         if current_window_end is None or alert_time >= current_window_end:
             # Starts a new bookable window!
-            current_window_end = alert_time + timedelta(hours=win_dur)
+            booked_start: Optional[datetime] = None
+            if align_to_clock:
+                booked_start = clock_slot_start(alert_time, expected_hours, tz)
+                if current_window_end is not None and booked_start < current_window_end:
+                    # Never overlap the previous booking (only possible with unusual slot sizes).
+                    booked_start = current_window_end
+                win_dur = expected_hours
+                current_window_end = booked_start + timedelta(hours=win_dur)
+            else:
+                current_window_end = alert_time + timedelta(hours=win_dur)
             window_source = inc
             current_window_duration = win_dur
 
@@ -240,19 +359,46 @@ def create_sync_plan(
                             shift=matching_shift,
                             is_sociable=is_soc,
                             window_hours=current_window_duration,
+                            booked_start=booked_start,
                         )
                     )
                 else:
-                    items.append(
-                        SyncItem(
-                            incident=inc,
-                            hours=expected_hours,
-                            status=SyncStatus.PENDING_CREATION,
-                            shift=matching_shift,
-                            is_sociable=is_soc,
-                            window_hours=current_window_duration,
+                    slot_start = (booked_start or alert_time).astimezone(tz)
+                    slot_end = slot_start + timedelta(hours=expected_hours)
+                    free, overlapped_by = free_part_of_slot(slot_start, slot_end, busy)
+                    # The entry that covers the moment of the alert gets the alert as a note line.
+                    append_to = entry_covering(alert_time, busy) or (overlapped_by if free is None else None)
+                    if free is None:
+                        items.append(
+                            SyncItem(
+                                incident=inc,
+                                hours=0.0,
+                                status=SyncStatus.COVERED_BY_EXISTING,
+                                harvest_entry_id=append_to,
+                                append_to_entry_id=append_to,
+                                shift=matching_shift,
+                                is_sociable=is_soc,
+                                window_hours=current_window_duration,
+                                booked_start=booked_start,
+                            )
                         )
-                    )
+                    else:
+                        trimmed = overlapped_by is not None
+                        items.append(
+                            SyncItem(
+                                incident=inc,
+                                hours=round((free[1] - free[0]).total_seconds() / 3600, 2)
+                                if trimmed
+                                else expected_hours,
+                                status=SyncStatus.PENDING_CREATION,
+                                shift=matching_shift,
+                                is_sociable=is_soc,
+                                window_hours=current_window_duration,
+                                booked_start=free[0] if trimmed else booked_start,
+                                append_to_entry_id=append_to,
+                                trimmed=trimmed,
+                            )
+                        )
         else:
             # Within the active window of window_source -> ignored
             if in_requested_range:
@@ -297,7 +443,7 @@ def execute_sync_plan(
         }
 
         # Calculate start and end times in user's target timezone
-        start_dt = item.incident.event_time.astimezone(effective_tz)
+        start_dt = (item.booked_start or item.incident.event_time).astimezone(effective_tz)
         end_dt = start_dt + timedelta(hours=item.hours)
         started_time_str = harvest_client.format_time_for_harvest(start_dt)
         ended_time_str = harvest_client.format_time_for_harvest(end_dt)
@@ -319,5 +465,22 @@ def execute_sync_plan(
         except Exception as e:
             item.status = SyncStatus.FAILED
             item.error_message = str(e)
+
+    # Alerts that fall in time already logged: add them as a new line in that entry's notes.
+    for item in plan.items:
+        if item.append_to_entry_id is None:
+            continue
+        if item.status not in (SyncStatus.COVERED_BY_EXISTING, SyncStatus.CREATED):
+            continue
+        try:
+            harvest_client.append_note_line(item.append_to_entry_id, item.formatted_note)
+            if item.status == SyncStatus.COVERED_BY_EXISTING:
+                item.status = SyncStatus.ADDED_TO_EXISTING
+                item.harvest_entry_id = item.append_to_entry_id
+        except Exception as e:
+            message = f"Couldn't add the alert to entry {item.append_to_entry_id}: {e}"
+            if item.status == SyncStatus.COVERED_BY_EXISTING:
+                item.status = SyncStatus.FAILED
+            item.error_message = message
 
     return plan.items
