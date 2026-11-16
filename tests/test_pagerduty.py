@@ -251,3 +251,72 @@ def test_pagerduty_auth_failure():
         except PagerDutyAPIError as e:
             assert e.status_code == 401
             assert "401 Unauthorized" in str(e)
+
+
+def _ack_entry(entry_id, inc_id, inc_num, created_at):
+    return {
+        "id": entry_id,
+        "type": "acknowledge_log_entry",
+        "created_at": created_at,
+        "agent": {"id": "PUSER123"},
+        "incident": {"id": inc_id, "incident_number": inc_num, "created_at": created_at},
+    }
+
+
+def test_get_acknowledged_incidents_splits_window_over_offset_cap(monkeypatch):
+    """A day with more log entries than the pagination cap is split in half, not truncated."""
+    import json
+    from urllib.parse import parse_qs, urlparse
+    import autoharvest.pagerduty as pd_module
+
+    monkeypatch.setattr(pd_module, "PAGERDUTY_MAX_OFFSET", 200)  # keep the test small
+    client = PagerDutyClient(token="pd_test_tok")
+    since = datetime(2026, 10, 10, 0, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 11, 0, 0, 0, tzinfo=timezone.utc)
+    seen = []
+
+    def callback(request):
+        q = parse_qs(urlparse(request.url).query)
+        start = datetime.fromisoformat(q["since"][0])
+        end = datetime.fromisoformat(q["until"][0])
+        offset, limit = int(q["offset"][0]), int(q["limit"][0])
+        seen.append((start, end, offset))
+        assert offset + limit <= 200, "must never request past the cap"
+        if end - start == until - since:
+            # The full day is too dense: every page is full and there is always more.
+            body = {"log_entries": [{"id": f"N{offset + i}", "type": "notify_log_entry"} for i in range(100)], "more": True}
+        elif start == since:
+            body = {"log_entries": [_ack_entry("L1", "PINC1", 101, "2026-10-10T03:00:00Z")], "more": False}
+        else:
+            body = {"log_entries": [_ack_entry("L2", "PINC2", 102, "2026-10-10T20:00:00Z")], "more": False}
+        return (200, {}, json.dumps(body))
+
+    with responses.RequestsMock() as rsps:
+        rsps.add_callback(responses.GET, "https://api.pagerduty.com/log_entries", callback=callback)
+        incidents = client.get_acknowledged_incidents(user_id="PUSER123", since=since, until=until)
+
+    assert [i.incident_id for i in incidents] == ["PINC1", "PINC2"]
+    halves = {(s, e) for s, e, _ in seen if e - s < until - since}
+    assert halves == {(since, datetime(2026, 10, 10, 12, tzinfo=timezone.utc)), (datetime(2026, 10, 10, 12, tzinfo=timezone.utc), until)}
+
+
+def test_get_acknowledged_incidents_raises_when_window_cannot_be_split_further(monkeypatch):
+    """If even a one-minute window exceeds the cap, fail loudly rather than drop alerts."""
+    import autoharvest.pagerduty as pd_module
+
+    monkeypatch.setattr(pd_module, "PAGERDUTY_MAX_OFFSET", 200)
+    client = PagerDutyClient(token="pd_test_tok")
+    since = datetime(2026, 10, 10, 0, 0, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 10, 0, 4, 0, tzinfo=timezone.utc)
+    full_page = {
+        "log_entries": [{"id": f"L{i}", "type": "notify_log_entry"} for i in range(100)],
+        "more": True,
+    }
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, "https://api.pagerduty.com/log_entries", json=full_page, status=200)
+        try:
+            client.get_acknowledged_incidents(user_id="PUSER123", since=since, until=until)
+            assert False, "Should have raised PagerDutyAPIError"
+        except PagerDutyAPIError as e:
+            assert "incomplete" in str(e)

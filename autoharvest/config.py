@@ -30,10 +30,17 @@ class Config:
     annual_salary: Optional[float] = None
 
     def get_tz(self) -> ZoneInfo:
-        try:
-            return ZoneInfo(self.timezone)
-        except (ZoneInfoNotFoundError, ValueError):
-            return ZoneInfo("UTC")
+        """
+        Return the configured timezone. Raises ValueError for an unknown name rather
+        than silently using UTC, since the timezone decides sociable vs unsociable hours.
+        """
+        tz = resolve_timezone(self.timezone)
+        if tz is None:
+            raise ValueError(
+                f"Unknown TIMEZONE '{self.timezone}'. Use an IANA name such as "
+                "'Europe/London' or 'UTC' (run `autoharvest setup` or edit .env)."
+            )
+        return tz
 
     def validate_pagerduty(self) -> list[str]:
         errors = []
@@ -58,6 +65,14 @@ class Config:
         if self.sociable_hours_per_alert <= 0 or self.unsociable_hours_per_alert <= 0:
             errors.append("Alert booking hours must be positive numbers.")
         return errors
+
+
+def resolve_timezone(name: str) -> Optional[ZoneInfo]:
+    """Return a ZoneInfo for a valid IANA timezone name, or None if it is unknown."""
+    try:
+        return ZoneInfo(name.strip())
+    except (ZoneInfoNotFoundError, ValueError, AttributeError):
+        return None
 
 
 def get_default_timezone() -> str:
@@ -173,4 +188,9 @@ def save_config_to_env(
 
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+    # The file holds API tokens: make it readable by the owner only.
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
     return path

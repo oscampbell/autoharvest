@@ -7,7 +7,13 @@ import click
 from rich.markup import escape
 from rich.prompt import Confirm, FloatPrompt, Prompt
 
-from autoharvest.config import Config, get_default_timezone, load_config, save_config_to_env
+from autoharvest.config import (
+    Config,
+    get_default_timezone,
+    load_config,
+    resolve_timezone,
+    save_config_to_env,
+)
 from autoharvest.display import (
     console,
     display_estimated_pay,
@@ -42,7 +48,17 @@ from autoharvest.sync import (
 def cli(ctx: click.Context, config_path: Optional[str]) -> None:
     """autoharvest - Sync PagerDuty acknowledged incidents to Harvest time entries."""
     ctx.ensure_object(dict)
+    ctx.obj["config_path"] = config_path
     ctx.obj["config"] = load_config(config_path)
+
+
+def get_tz_or_abort(cfg: Config) -> ZoneInfo:
+    """Resolve the configured timezone, or print a clear error and abort."""
+    try:
+        return cfg.get_tz()
+    except ValueError as e:
+        console.print(f"[bold red]Configuration Error:[/] {e}")
+        raise click.Abort()
 
 
 @cli.command("test")
@@ -155,7 +171,7 @@ def shifts_cmd(ctx: click.Context, days: int) -> None:
         console.print(f"[bold red]PagerDuty Error:[/] {e}")
         raise click.Abort()
 
-    tz = cfg.get_tz()
+    tz = get_tz_or_abort(cfg)
     now = datetime.now(tz)
     since = now - timedelta(days=days)
     until = now + timedelta(days=14)
@@ -279,7 +295,14 @@ def setup_cmd(ctx: click.Context) -> None:
 
     # 5. Timezone
     detected_tz = cfg.timezone or get_default_timezone()
+    if resolve_timezone(detected_tz) is None:
+        detected_tz = get_default_timezone()
     chosen_tz = Prompt.ask("\nEnter [bold]Timezone[/] for date grouping", default=detected_tz)
+    while resolve_timezone(chosen_tz) is None:
+        console.print(
+            f"[yellow]'{chosen_tz}' is not a known timezone. Use an IANA name like Europe/London or UTC.[/yellow]"
+        )
+        chosen_tz = Prompt.ask("Enter [bold]Timezone[/] for date grouping", default=detected_tz)
 
     # 6. Annual Gross Salary (Optional)
     console.print(
@@ -317,7 +340,7 @@ def setup_cmd(ctx: click.Context) -> None:
     if annual_salary_val is not None:
         env_updates["ANNUAL_SALARY"] = f"{annual_salary_val:.2f}"
 
-    env_path = save_config_to_env(env_updates)
+    env_path = save_config_to_env(env_updates, target_path=ctx.obj.get("config_path"))
     console.print(f"\n[bold green]✓ Configuration saved to {env_path.resolve()}[/]")
     console.print("\nYou are all set! Run [bold cyan]autoharvest sync[/] to preview your alerts.")
 
@@ -379,7 +402,7 @@ def sync_cmd(
         console.print("\nRun [bold green]autoharvest setup[/] to configure.")
         raise click.Abort()
 
-    tz = cfg.get_tz()
+    tz = get_tz_or_abort(cfg)
     pd_client = PagerDutyClient(token=cfg.pagerduty_api_token, base_url=cfg.pagerduty_base_url)
 
     # Determine PagerDuty user
@@ -569,7 +592,7 @@ def overtime_cmd(
             console.print(f"[bold red]• {err}[/]")
         raise click.Abort()
 
-    tz = cfg.get_tz()
+    tz = get_tz_or_abort(cfg)
     try:
         from_date, to_date, period_label = resolve_overtime_period(
             month=month,
