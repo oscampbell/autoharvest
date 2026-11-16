@@ -146,6 +146,7 @@ autoharvest sync --shift --hours-per-alert 0.5 --apply
 - `--sociable-hours <FLOAT>`: Override hours per alert for sociable hours (default: 0.5).
 - `--unsociable-hours <FLOAT>`: Override hours per alert for unsociable hours (default: 1.0).
 - `--hours-per-alert <FLOAT>`: Flat override for all alerts (bypasses sociable/unsociable rates).
+- `--align-to-clock` / `--from-alert-time`: Book each alert as the clock hour/half-hour it falls in (an alert at 04:37 is logged as 04:00–05:00, and other alerts in that hour are ignored), or start at the alert time (the default). Set `ALIGN_TO_CLOCK=true` in `.env` (setup asks about this, or run `autoharvest config set align-to-clock true`) to make clock-aligned the default.
 - `--project-id <INT>`: Override Harvest Project ID.
 - `--task-id <INT>`: Override Harvest Task ID.
 - `-y`, `--apply`: Automatically submit pending entries without interactive prompt.
@@ -205,6 +206,18 @@ To configure your annual gross salary permanently, run `autoharvest setup` (Step
 
 ---
 
+## Changing a Setting
+
+`autoharvest config set <setting> <value>` changes one setting in your `.env` without re-running setup, and prints the old and new value. It honours `--config`.
+
+```bash
+autoharvest config set align-to-clock true
+autoharvest config set timezone Europe/London
+autoharvest config show   # API tokens are hidden
+```
+
+Settings: `align-to-clock`, `sociable-hours`, `unsociable-hours`, `project-id`, `task-id`, `timezone`. Values are checked before anything is written. API tokens can only be changed through `autoharvest setup`, which hides them as you type, so they never end up in your shell history.
+
 ## How It Works
 
 1. **PagerDuty On-Call Schedule Verification**: Queries `GET /oncalls` to retrieve all scheduled on-call shifts for you during the requested timeframe. Any alerts you acknowledged during normal working hours or weeks off are automatically ignored.
@@ -213,6 +226,7 @@ To configure your annual gross salary permanently, run `autoharvest setup` (Step
    - **Sociable Hours**: Weekends (08:30 to 00:00) & Weekdays (17:30 to 00:00). Initiates a **0.5-hour bookable window** (0.50 hours). Alerts within the 30-minute window are ignored.
    - **Unsociable Hours**: All other times / overnight. Initiates a **1.0-hour bookable window** (1.00 hour). Alerts within the 60-minute window are ignored.
    - The next bookable time starts with the next alert that occurs after the active window expires.
+   - With `--align-to-clock`, the window is instead the clock-aligned hour (unsociable) or half-hour (sociable) the alert falls in: an alert at 04:37 books 04:00–05:00, and one at 19:44 on a weekend books 19:30–20:00.
 4. **Harvest Pre-Check**: Queries `GET /v2/time_entries` for the same date window. It checks for incident matches via `external_reference.id` and note prefix (`PG#<IncidentNo.>`).
 5. **Time Entry Creation**: For any unlogged bookable alert, creates an entry in Harvest via `POST /v2/time_entries` with:
    - `spent_date`: Date the alert occurred (in your local timezone)
