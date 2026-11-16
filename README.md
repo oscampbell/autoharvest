@@ -30,7 +30,7 @@ When you finish an on-call shift or want to log your weekly on-call hours, `auto
 `autoharvest` requires Python 3.10+.
 
 ```bash
-git clone https://github.com/olivercampbell/autoharvest.git
+git clone https://github.com/oscampbell/autoharvest.git
 cd autoharvest
 
 # Create virtual environment and install
@@ -52,9 +52,12 @@ autoharvest setup
 The wizard will:
 1. Ask for your **PagerDuty REST API Token** (from your PagerDuty Profile -> User Settings -> Create API User Token, or an account token).
 2. Ask for your **Harvest Personal Access Token** and **Harvest Account ID** (generated at [id.getharvest.com/developers](https://id.getharvest.com/developers)).
-3. Fetch your available Harvest projects and tasks and let you pick which one to log on-call hours against (e.g. "Infrastructure & SRE" -> "On-Call Support").
-4. Ask for your preferred hours per alert (default: `1.0`).
-5. Save your settings to a local `.env` file.
+3. Fetch your available Harvest projects and tasks and let you pick which one to log on-call hours against.
+4. Ask for your preferred hours for **sociable alerts** (weekends 08:30–00:00, weekdays 17:30–00:00; default `0.5`) and **unsociable alerts** (all other times / overnight; default `1.0`).
+5. Ask for your local **Timezone** (e.g. `Europe/London`).
+6. Ask for your **Annual Gross Salary before tax** (optional, used for `autoharvest overtime --pay` take-home pay calculations).
+7. Ask for your booking style preference: whether to book alerts snapped to the **clock hour/half-hour** (`--align-to-clock`) or from the alert timestamp.
+8. Save your settings securely to a local `.env` file (with `0600` permissions).
 
 Alternatively, copy `.env.example` to `.env` and fill in the values manually.
 

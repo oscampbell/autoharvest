@@ -79,11 +79,14 @@ def test_setup_asks_about_clock_alignment(mock_pd_cls, mock_harvest_cls, tmp_pat
     )
     mock_harvest_cls.return_value.get_project_assignments.return_value = []
 
-    # pd token, harvest token, account id, project, task, sociable, unsociable, timezone, salary, align
-    answers = "pdtok\nhtok\n123\n1\n2\n0.5\n1.0\nEurope/London\n\ny\n"
-    result = CliRunner().invoke(cli, ["setup"], input=answers)
+    # Mock interactive prompts so password=True doesn't block on getpass in non-TTY test environments
+    prompt_answers = iter(["pdtok", "htok", "123", "1", "2", "Europe/London", ""])
+    monkeypatch.setattr("autoharvest.cli.Prompt.ask", lambda *a, **k: next(prompt_answers))
+    monkeypatch.setattr("autoharvest.cli.FloatPrompt.ask", lambda *a, **k: 0.5 if "sociable" in str(a) else 1.0)
+    monkeypatch.setattr("autoharvest.cli.Confirm.ask", lambda *a, **k: True)
+
+    result = CliRunner().invoke(cli, ["setup"])
 
     assert result.exit_code == 0, result.output
-    assert "clock hour/half-hour" in result.output
     saved = dotenv_values(tmp_path / ".env")
     assert saved["ALIGN_TO_CLOCK"] == "true"

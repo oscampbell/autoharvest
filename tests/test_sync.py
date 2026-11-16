@@ -724,3 +724,37 @@ def test_execute_sync_plan_keeps_a_window_that_crosses_midnight():
     assert (kwargs["started_time"], kwargs["ended_time"], kwargs["spent_date"], kwargs["hours"]) == (
         "23:40", "00:40", "2026-11-08", 1.0
     )
+
+
+def test_bst_daylight_savings_transition():
+    """Verify sociable/unsociable hours respect BST (UTC+1) and GMT (UTC+0) properly."""
+    from autoharvest.sync import is_sociable_hours
+
+    london_tz = ZoneInfo("Europe/London")
+
+    # 1. Summer (BST, UTC+1): Sunday 12 July 2026
+    # 07:15 UTC is 08:15 BST (Sunday before 08:30 -> unsociable)
+    dt_summer_early = datetime(2026, 7, 12, 7, 15, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_summer_early, tz=london_tz) is False
+
+    # 07:35 UTC is 08:35 BST (Sunday after 08:30 -> sociable)
+    dt_summer_sociable = datetime(2026, 7, 12, 7, 35, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_summer_sociable, tz=london_tz) is True
+
+    # 2. Summer weekday (Wednesday 15 July 2026): sociable only 17:30 - 00:00 BST
+    # 16:20 UTC is 17:20 BST (before 17:30 -> unsociable)
+    dt_summer_weekday_before = datetime(2026, 7, 15, 16, 20, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_summer_weekday_before, tz=london_tz) is False
+
+    # 16:40 UTC is 17:40 BST (after 17:30 -> sociable)
+    dt_summer_weekday_sociable = datetime(2026, 7, 15, 16, 40, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_summer_weekday_sociable, tz=london_tz) is True
+
+    # 3. Winter (GMT, UTC+0): Sunday 13 December 2026
+    # 08:15 UTC is 08:15 GMT (Sunday before 08:30 -> unsociable)
+    dt_winter_early = datetime(2026, 12, 13, 8, 15, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_winter_early, tz=london_tz) is False
+
+    # 08:35 UTC is 08:35 GMT (Sunday after 08:30 -> sociable)
+    dt_winter_sociable = datetime(2026, 12, 13, 8, 35, tzinfo=timezone.utc)
+    assert is_sociable_hours(dt_winter_sociable, tz=london_tz) is True
