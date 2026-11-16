@@ -164,10 +164,9 @@ def test_classify_overtime_task():
     assert cat == "Out of Hours Configuration"
     assert rate == 30.0
 
-    # Fallback
-    cat, rate = classify_overtime_task("General Maintenance", "Internal", rates)
-    assert cat == "General Maintenance"
-    assert rate == 30.0
+    # Non on-call work is not overtime
+    assert classify_overtime_task("General Maintenance", "Internal", rates) is None
+    assert classify_overtime_task("Development", "Client X", rates) is None
 
 
 def test_calculate_overtime_report():
@@ -258,3 +257,44 @@ def test_calculate_overtime_report():
     assert ooh_summary.total_hours == 8.0
     assert ooh_summary.total_earned == 240.0
     assert ooh_summary.entry_count == 1
+
+
+def test_calculate_overtime_report_excludes_normal_work_and_scopes_to_user():
+    harvest_mock = MagicMock()
+    harvest_mock.get_current_user.return_value.id = 42
+    harvest_mock.get_time_entries.return_value = [
+        HarvestTimeEntry(
+            id=1, spent_date="2026-10-05", hours=2.0, notes="", project_id=1,
+            project_name="On Call", task_id=10, task_name="1st On Call - Inactive",
+        ),
+        HarvestTimeEntry(
+            id=2, spent_date="2026-10-05", hours=1.0, notes="PG#1 - Core - Alert", project_id=2,
+            project_name="UK Support", task_id=20, task_name="1st On call - Active",
+        ),
+        HarvestTimeEntry(
+            id=3, spent_date="2026-10-06", hours=7.5, notes="Feature work", project_id=3,
+            project_name="Client X", task_id=30, task_name="Development",
+        ),
+    ]
+
+    report = calculate_overtime_report(
+        harvest_client=harvest_mock,
+        start_date="2026-10-01",
+        end_date="2026-10-31",
+        period_label="October 2026",
+        rates={"inactive": 6.0, "active": 30.0, "out_of_hours": 30.0},
+    )
+
+    harvest_mock.get_time_entries.assert_called_once_with(
+        from_date="2026-10-01", to_date="2026-10-31", user_id=42
+    )
+    assert len(report.items) == 2
+    assert report.total_hours == 3.0
+    assert report.total_earned == 2.0 * 6.0 + 1.0 * 30.0
+    # Normal work is left out of the totals but still reported, so it isn't silently lost.
+    assert report.excluded_hours == {"Client X / Development": 7.5}
+    # Active sorts before Inactive ("active" is a substring of "inactive")
+    assert [c.category for c in report.categories] == [
+        "1st On Call - Active",
+        "1st On Call - Inactive",
+    ]

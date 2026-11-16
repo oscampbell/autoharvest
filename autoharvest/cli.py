@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 import click
+from rich.markup import escape
 from rich.prompt import Confirm, FloatPrompt, Prompt
 
 from autoharvest.config import Config, get_default_timezone, load_config, save_config_to_env
@@ -25,6 +26,7 @@ from autoharvest.sync import (
     create_sync_plan,
     execute_sync_plan,
     parse_datetime,
+    parse_end_datetime,
     resolve_shift_window,
 )
 
@@ -411,7 +413,7 @@ def sync_cmd(
             raise click.Abort()
     elif since:
         start_dt = parse_datetime(since, tz)
-        end_dt = parse_datetime(until, tz) if until else now
+        end_dt = parse_end_datetime(until, tz) if until else now
     else:
         start_dt = now - timedelta(days=days)
         end_dt = now
@@ -512,6 +514,18 @@ def sync_cmd(
         console.print("\n[bold green]✓ Successfully logged all pending alerts to Harvest![/]")
 
 
+def _print_excluded_hours(report) -> None:
+    """Warn about Harvest hours that weren't counted as overtime, so a misnamed on-call task is visible."""
+    if not report.excluded_hours:
+        return
+    console.print(
+        "\n[yellow]Not counted as overtime (task name isn't on-call, active, inactive or out of hours):[/yellow]"
+    )
+    for name, hours in sorted(report.excluded_hours.items()):
+        console.print(f"[yellow]  • {escape(name)}: {hours:.2f}h[/yellow]")
+    console.print("[dim]If any of these is on-call work, check its Harvest task name.[/dim]")
+
+
 @cli.command("overtime")
 @click.option("--payday", "-p", default=None, help="Target payday month (e.g. 'November', '2026-11'). Pay period runs from 16th of previous month to 15th.")
 @click.option("--last-payday", is_flag=True, default=False, help="Calculate overtime for the previous payday cycle.")
@@ -609,6 +623,7 @@ def overtime_cmd(
         console.print(
             f"[yellow]No overtime time entries found in Harvest for {period_label} ({from_date} to {to_date}).[/yellow]"
         )
+        _print_excluded_hours(report)
         if show_pay:
             if effective_salary is None:
                 console.print(
@@ -626,6 +641,7 @@ def overtime_cmd(
         return
 
     display_overtime_report(report, detailed=detailed)
+    _print_excluded_hours(report)
 
     if show_pay:
         if effective_salary is None:
