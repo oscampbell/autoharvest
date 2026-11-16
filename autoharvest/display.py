@@ -136,6 +136,12 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
         elif item.status == SyncStatus.IGNORED_NOT_ONCALL:
             status_badge = "[dim]🚫 Not On-Call (Outside shift)[/]"
             hours_str = "[dim]0.00h[/]"
+        elif item.status == SyncStatus.COVERED_BY_EXISTING:
+            status_badge = f"[bold yellow]↪ Add to entry {item.append_to_entry_id}[/]"
+            hours_str = "[dim]0.00h[/]"
+        elif item.status == SyncStatus.ADDED_TO_EXISTING:
+            status_badge = f"[bold green]✓ Added to entry {item.append_to_entry_id}[/]"
+            hours_str = "[dim]0.00h[/]"
         elif item.status == SyncStatus.PENDING_CREATION:
             if is_dry_run:
                 status_badge = "[bold yellow]⏳ Ready to Log[/]"
@@ -188,6 +194,16 @@ def display_sync_plan_table(plan: SyncPlan, is_dry_run: bool = True) -> None:
             f"      ├─ [green]Sociable Hours ({plan.sociable_hours:.2f}h):[/] {len(sociable_pending)} alert(s) ({sum(i.hours for i in sociable_pending):.2f} hrs)",
             f"      └─ [green]Unsociable Hours ({plan.unsociable_hours:.2f}h):[/] {len(unsociable_pending)} alert(s) ({sum(i.hours for i in unsociable_pending):.2f} hrs)",
         ])
+    covered = [i for i in plan.items if i.status in (SyncStatus.COVERED_BY_EXISTING, SyncStatus.ADDED_TO_EXISTING)]
+    if covered:
+        summary_lines.append(
+            f"• [bold yellow]Alerts in time already logged:[/] {len(covered)} alert(s), added as a note line to that entry (0.00 hours)"
+        )
+    trimmed = [i for i in plan.items if i.trimmed and i.status in (SyncStatus.PENDING_CREATION, SyncStatus.CREATED)]
+    if trimmed:
+        summary_lines.append(
+            f"• [bold yellow]Shortened to the uncovered part:[/] {len(trimmed)} alert(s)"
+        )
     summary_lines.append(
         f"• [dim]Ignored Alerts (Within active alert window):[/] {ignored_count} alert(s) (0.00 hours)"
     )

@@ -375,6 +375,13 @@ def setup_cmd(ctx: click.Context) -> None:
     help="Book each alert as the clock hour/half-hour it falls in (04:37 -> 04:00-05:00) "
     "instead of starting at the alert time. Default: ALIGN_TO_CLOCK in .env, else off.",
 )
+@click.option(
+    "--allow-overlap",
+    is_flag=True,
+    default=False,
+    help="Log every slot as a new entry even if time is already logged on the same task "
+    "(by default covered alerts are added as a line to the existing entry instead).",
+)
 @click.option("--show-non-oncall", is_flag=True, default=False, help="Include alerts that occurred outside on-call shifts in the preview table.")
 @click.pass_context
 def sync_cmd(
@@ -392,6 +399,7 @@ def sync_cmd(
     dry_run: bool,
     all_alerts: bool,
     align_to_clock: Optional[bool],
+    allow_overlap: bool,
     show_non_oncall: bool,
 ) -> None:
     """Sync acknowledged PagerDuty alerts to Harvest time tracking."""
@@ -488,6 +496,7 @@ def sync_cmd(
                 filter_oncall_shifts=not all_alerts,
                 include_non_oncall=show_non_oncall,
                 align_to_clock=cfg.align_to_clock if align_to_clock is None else align_to_clock,
+                skip_covered=not allow_overlap,
                 progress_callback=update_progress,
             )
         except Exception as e:
@@ -519,7 +528,7 @@ def sync_cmd(
     is_dry_run = dry_run or (not apply_changes)
     display_sync_plan_table(plan, is_dry_run=is_dry_run)
 
-    if not plan.pending_items:
+    if not plan.actionable_items:
         console.print("\n[bold green]✓ All acknowledged alerts for this period are already logged in Harvest![/]")
         return
 
@@ -532,10 +541,13 @@ def sync_cmd(
     # If --apply was not provided, prompt user interactively
     if not apply_changes:
         console.print("")
-        should_apply = Confirm.ask(
+        question = (
             f"Log [bold green]{plan.total_pending_hours:.2f} hours[/] "
-            f"for [bold green]{len(plan.pending_items)} alert(s)[/] into Harvest now?"
+            f"for [bold green]{len(plan.pending_items)} alert(s)[/]"
         )
+        if plan.covered_items:
+            question += f" and add [bold green]{len(plan.covered_items)} alert(s)[/] to existing entries"
+        should_apply = Confirm.ask(question + " in Harvest now?")
         if not should_apply:
             console.print("[dim]Aborted. No changes made.[/dim]")
             return
